@@ -234,6 +234,7 @@ from omnigent.server.schemas import (
     BackgroundSessionTitleRequest,
     BackgroundSessionTitleResponse,
 )
+from omnigent.session_controls import SESSION_CONTROL_HANDLERS, session_control_handler
 from omnigent.session_event_batch import MAX_SESSION_EVENT_REQUEST_BYTES
 from omnigent.spec.skill_sources import resolve_session_skills
 from omnigent.spec.types import AgentSpec, LocalToolInfo, SkillSpec
@@ -8906,43 +8907,15 @@ def create_runner_app(
         if codex_goal_response is not None:
             return codex_goal_response
 
-        if body_type == "compact":
-            if _session_harness_name(conversation_id) == "claude-native":
-                return await _handle_claude_native_compact(conversation_id)
-            if _session_harness_name(conversation_id) == "codex-native":
-                return await _handle_codex_native_compact(conversation_id)
-            if _session_harness_name(conversation_id) == "opencode-native":
-                return await _handle_opencode_native_compact(conversation_id)
-            if _session_harness_name(conversation_id) == "cursor-native":
-                return await _handle_cursor_native_compact(conversation_id)
-            if _session_harness_name(conversation_id) == "pi-native":
-                return await _handle_pi_native_compact(conversation_id)
-            if _session_harness_name(conversation_id) == "hermes-native":
-                return await _handle_hermes_native_compact(conversation_id)
-            if _session_harness_name(conversation_id) == "qwen-native":
-                return await _handle_qwen_native_compact(conversation_id)
-            if _session_harness_name(conversation_id) == "devin-native":
-                return await _handle_devin_native_compact(conversation_id)
-            if _session_harness_name(conversation_id) == "claude-sdk":
-                return await _handle_claude_sdk_compact(conversation_id)
-            return Response(status_code=204)
-
-        if body_type == "clear":
-            if _session_harness_name(conversation_id) == "claude-native":
-                return await _handle_claude_native_clear(conversation_id)
-            if _session_harness_name(conversation_id) == "codex-native":
-                return await _handle_codex_native_clear(conversation_id)
-            if _session_harness_name(conversation_id) == "opencode-native":
-                return await _handle_opencode_native_clear(conversation_id)
-            # Only a server that continues the work in a new session marks the
-            # request; an older server's plain clear keeps the unsupported 204.
-            if (
-                _session_harness_name(conversation_id) == "claude-sdk"
-                and isinstance(body, dict)
-                and body.get("continue_in_new_session") is True
-            ):
-                return await _handle_claude_sdk_clear(conversation_id)
-            return Response(status_code=204)
+        if body_type in SESSION_CONTROL_HANDLERS:
+            handler_name = session_control_handler(
+                body_type, _session_harness_name(conversation_id), body
+            )
+            # No handler for this harness: the server answers that the control
+            # is not available for this session.
+            if handler_name is None:
+                return Response(status_code=204)
+            return await getattr(_native_controls, handler_name)(conversation_id)
 
         if body_type == "cost_approval_popup":
             elicitation_id = body.get("elicitation_id") if isinstance(body, dict) else None
@@ -9298,43 +9271,30 @@ def create_runner_app(
     )
     _codex_native_model_options = _native_controls.codex_native_model_options
     _handle_claude_native_btw_dismiss = _native_controls.handle_claude_native_btw_dismiss
-    _handle_claude_native_clear = _native_controls.handle_claude_native_clear
-    _handle_claude_native_compact = _native_controls.handle_claude_native_compact
     _handle_claude_native_cost_popup = _native_controls.handle_claude_native_cost_popup
     _handle_claude_native_effort_change = _native_controls.handle_claude_native_effort_change
     _handle_claude_native_model_change = _native_controls.handle_claude_native_model_change
     _handle_claude_native_permission_mode_change = (
         _native_controls.handle_claude_native_permission_mode_change
     )
-    _handle_claude_sdk_clear = _native_controls.handle_claude_sdk_clear
-    _handle_claude_sdk_compact = _native_controls.handle_claude_sdk_compact
     _handle_codex_native_approval_mode_change = (
         _native_controls.handle_codex_native_approval_mode_change
     )
-    _handle_codex_native_clear = _native_controls.handle_codex_native_clear
-    _handle_codex_native_compact = _native_controls.handle_codex_native_compact
     _handle_codex_native_cost_popup = _native_controls.handle_codex_native_cost_popup
     _handle_codex_native_plan_mode_change = _native_controls.handle_codex_native_plan_mode_change
     _handle_codex_native_settings_update = _native_controls.handle_codex_native_settings_update
-    _handle_cursor_native_compact = _native_controls.handle_cursor_native_compact
     _handle_cursor_native_model_change = _native_controls.handle_cursor_native_model_change
-    _handle_devin_native_compact = _native_controls.handle_devin_native_compact
     _handle_devin_native_effort_change = _native_controls.handle_devin_native_effort_change
     _handle_devin_native_model_change = _native_controls.handle_devin_native_model_change
     _handle_devin_native_permission_mode_change = (
         _native_controls.handle_devin_native_permission_mode_change
     )
-    _handle_hermes_native_compact = _native_controls.handle_hermes_native_compact
     _handle_kiro_native_model_change = _native_controls.handle_kiro_native_model_change
     _handle_opencode_native_blocked_notice = _native_controls.handle_opencode_native_blocked_notice
-    _handle_opencode_native_clear = _native_controls.handle_opencode_native_clear
-    _handle_opencode_native_compact = _native_controls.handle_opencode_native_compact
     _handle_opencode_native_cost_popup = _native_controls.handle_opencode_native_cost_popup
     _handle_opencode_native_model_change = _native_controls.handle_opencode_native_model_change
-    _handle_pi_native_compact = _native_controls.handle_pi_native_compact
     _handle_pi_native_effort_change = _native_controls.handle_pi_native_effort_change
     _handle_pi_native_model_change = _native_controls.handle_pi_native_model_change
-    _handle_qwen_native_compact = _native_controls.handle_qwen_native_compact
     _is_sdk_compact_body = _native_controls.is_sdk_compact_body
     _opencode_native_model_options = _native_controls.opencode_native_model_options
     _teardown_session_terminals = _native_controls.teardown_session_terminals

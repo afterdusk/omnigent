@@ -300,7 +300,12 @@ class _HandleOpencodeNativeCostPopupFn(Protocol):
 
 @dataclasses.dataclass(frozen=True)
 class NativeControls:
-    """Native-harness control handlers the runner app's event dispatch calls."""
+    """Native-harness control handlers the runner app's event dispatch calls.
+
+    The compact and clear handlers are looked up by attribute name through
+    :data:`omnigent.session_controls.SESSION_CONTROL_HANDLERS`, so a new one
+    needs an entry there as well as a field here.
+    """
 
     codex_native_model_options: Callable[[str], Coroutine[Any, Any, list[_JsonObject]]]
     handle_claude_native_btw_dismiss: Callable[[str], Coroutine[Any, Any, Response]]
