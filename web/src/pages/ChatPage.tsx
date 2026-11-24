@@ -82,7 +82,7 @@ import { isIOSShell, onNativeSidebarDrag, setNativeServerSwitcherHidden } from "
 import { type Agent, useSessionAgent, useAgents } from "@/hooks/useAgents";
 import { useFileMentionHarnesses } from "@/lib/agentLabels";
 import { useCanStartSideChat, usePermissions, useSessionOwner } from "@/hooks/usePermissions";
-import type { NativeModelOption, Session, SessionStatus, SkillSummary } from "@/lib/types";
+import type { NativeModelOption, Session, SessionStatus } from "@/lib/types";
 import { usePromptHistory } from "@/hooks/usePromptHistory";
 import { useReplyDraft } from "@/hooks/useReplyDraft";
 import { useModelPickerHotkey } from "@/hooks/useModelPickerHotkey";
@@ -254,13 +254,22 @@ import { HostBadge } from "@/components/HostBadge";
 import { MobileHeaderControlPortal } from "@/shell/MobileHeaderControlsSlot";
 import {
   type McpServerRow,
-  BUILTIN_SLASH_COMMANDS,
   isSlashCommandText,
   matchSlashCommandInvocation,
-  skillDisplayNames,
-  skillMenuDescription,
   SlashCommandMenu,
 } from "@/components/SlashCommandMenu";
+import {
+  buildSlashCatalog,
+  describeSlashCommand,
+  resolveSlashSubmission,
+  type SlashSubmission,
+} from "@/lib/slashCommands/catalog";
+import {
+  CHAT_COMMANDS,
+  type ChatCommandComposer,
+  type ChatCommandSession,
+} from "@/lib/slashCommands/chatCommands";
+import type { ForwardedCommand } from "@/lib/slashCommands/types";
 import { FileMentionMenu } from "@/components/FileMentionMenu";
 import { FileDropOverlay } from "@/components/FileDropOverlay";
 import { FilePathAwareMessageResponse } from "@/components/blocks/ChatMarkdown";
@@ -280,7 +289,7 @@ import { composerContextFromLabels } from "@/lib/composerContextAdapters";
 import { formatStatusModelLabel, formatModelEffortStatusLabel } from "@/lib/composerModelLabel";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { RewindPicker } from "@/components/RewindPicker";
-import { isFeatureEnabled, type ServerInfo } from "@/lib/capabilities";
+import { isFeatureEnabled } from "@/lib/capabilities";
 import { ChatPaneBody } from "@/shell/ChatPaneBody";
 import { MainTerminalSurface } from "@/shell/MainTerminalSurface";
 import { useChatInPanes } from "@/shell/panesViewGate";
@@ -2098,127 +2107,6 @@ interface ComposerProps {
   onViewportShrinkPinScroll?: () => void;
 }
 
-/**
- * Build the full slash-command map for the composer: built-ins
- * first (so they top the menu), then one entry per session skill
- * keyed by the session's skill prefix and name. Insertion order matters — the
- * menu iterates ``Object.entries`` and the user sees built-ins
- * before skills.
- *
- * :param skills: Session skill metadata returned by host discovery.
- * :param showEffort: Whether this session supports Web UI effort controls.
- * :param showModel: Whether to include ``/model`` (in-process sessions
- *     and claude-native, which both honor ``conv.model_override``; see
- *     the call site).
- * :param showPermissions: Whether to include ``/permissions``, which opens
- *     the codex-native approval-mode control in place of Codex's own popup.
- * :returns: Merged ``Record<command, description>``.
- */
-export function buildSlashCommandMap(
-  skills: readonly SkillSummary[],
-  showEffort: boolean,
-  showModel: boolean,
-  showCompact = true,
-  showBtw = false,
-  showSide = false,
-  skillPrefix: "/" | "$" = "/",
-  supportsModelReset = false,
-  showMcp = false,
-  showClear = false,
-  showPermissions = false,
-  showRewind = false,
-  showGoal = false,
-): Record<string, string> {
-  const m: Record<string, string> = {};
-  for (const [name, description] of Object.entries(BUILTIN_SLASH_COMMANDS)) {
-    if (name === "/effort" && !showEffort) continue;
-    if (name === "/model" && !showModel) continue;
-    if (name === "/compact" && !showCompact) continue;
-    if (name === "/mcp" && !showMcp) continue;
-    if (name === "/clear" && !showClear) continue;
-    if (name === "/permissions" && !showPermissions) continue;
-    if (name === "/rewind" && !showRewind) continue;
-    if (name === "/goal" && !showGoal) continue;
-    // /btw is a Claude Code CLI built-in — only offer it on claude-native.
-    if (name === "/btw" && !showBtw) continue;
-    // /side is a Codex CLI built-in (ephemeral fork) — only offer it on codex-native.
-    if (name === "/side" && !showSide) continue;
-    m[name] = name === "/model" && supportsModelReset ? `${description} | default` : description;
-  }
-  for (const skill of skills) {
-    m[`${skillPrefix}${skill.name}`] = skillMenuDescription(skill);
-  }
-  return m;
-}
-
-/** Build the same skill descriptions for leading and inline completion. */
-function buildSkillCommandMap(
-  skills: readonly SkillSummary[],
-  prefix: "/" | "$",
-): Record<string, string> {
-  return Object.fromEntries(
-    skills.map((skill) => [`${prefix}${skill.name}`, skillMenuDescription(skill)]),
-  );
-}
-
-/**
- * Whether the composer offers ``/clear`` for a session on *harness*.
- *
- * SDK clear requires its capability flag; native clear uses
- * ``session_event_types``. Elsewhere a typed /clear stays plaintext.
- */
-export function composerOffersClear(harness: string | null, info: ServerInfo | "loading"): boolean {
-  if (info === "loading") return false;
-  if (harness === "claude-sdk") return info.session_claude_sdk_clear === true;
-  return (
-    (harness === "claude-native" || harness === "codex-native") &&
-    !!info.session_event_types?.includes("clear")
-  );
-}
-
-/** Leave /rewind as text or a project skill on older servers. */
-export function composerOffersRewind(
-  harness: string | null,
-  info: ServerInfo | "loading",
-): boolean {
-  if (info === "loading") return false;
-  return (harness === "claude-native" || harness === "claude-sdk") && info.session_rewind === true;
-}
-
-/**
- * Set of slash commands that should fill the textarea with
- * ``"/cmd "`` on menu selection rather than executing immediately.
- * Includes the arg-taking built-ins (each gated on its own capability
- * flag) plus every session skill — skills never auto-execute on
- * selection; the user sends them, and :func:`Composer.submit` routes a
- * known skill to a ``slash_command`` event (in-process) or plaintext
- * (native sessions).
- *
- * :param skills: Session skill metadata returned by host discovery.
- * :param showEffort: Whether ``/effort`` should be selectable.
- * :param showModel: Whether ``/model`` should be selectable (same gate
- *     as :func:`buildSlashCommandMap`'s ``showModel``).
- * :returns: A ``Set`` of prefixed command and skill names.
- */
-export function buildSlashCommandWithArgsSet(
-  skills: readonly { name: string; description: string }[],
-  showEffort: boolean,
-  showModel: boolean,
-  showBtw = false,
-  showSide = false,
-  skillPrefix: "/" | "$" = "/",
-): Set<string> {
-  const s = new Set<string>();
-  if (showEffort) s.add("/effort");
-  if (showModel) s.add("/model");
-  // Selecting /btw fills "/btw " so the user types the side question after it.
-  if (showBtw) s.add("/btw");
-  // Selecting /side fills "/side " so the user types the side question after it.
-  if (showSide) s.add("/side");
-  for (const skill of skills) s.add(`${skillPrefix}${skill.name}`);
-  return s;
-}
-
 // Status-tray model/effort labels are shared with the landing composer — the
 // single source of truth lives in @/lib/composerModelLabel (imported above).
 // Re-exported here so ChatPage's existing named exports keep resolving for
@@ -2932,36 +2820,16 @@ function ComposerImpl(
     enabled: !isReadOnly && hostOnline !== false,
     starting: !isReadOnly && (runnerStarting || terminalPending),
   });
-  // ``/model`` writes ``conv.model_override`` (the same column the REPL's
-  // ``/model`` and native pickers write). In-process harnesses re-resolve
-  // it each turn; native wrappers expose it only when they have a picker
-  // path that the runner can propagate without blocking the vendor TUI.
-  const showModel = !isNativeWrapper || showModels;
   const { supportsModelReset } = sessionHarnessPicker;
-  // /compact is functional for native wrappers (claude-native,
-  // codex-native), which inject the slash command into the terminal, and
-  // for claude-sdk, whose runner sends /compact to the live SDK client to
-  // trigger native compaction. Other SDK harnesses don't support it yet.
-  const showCompact = isNativeWrapper || sessionHarness === "claude-sdk";
   const composerServerInfo = useServerInfo();
   const workflowsEnabled = isFeatureEnabled(composerServerInfo, "workflows");
   const skills = useMemo(
     () => filterWorkflowSkills(discoveredSkills, workflowsEnabled),
     [discoveredSkills, workflowsEnabled],
   );
-  const showClear = composerOffersClear(sessionHarness, composerServerInfo);
-  const showRewind = composerOffersRewind(sessionHarness, composerServerInfo);
   const [rewindPickerOpen, setRewindPickerOpen] = useState(false);
-  // /btw is a Claude Code CLI built-in (side chat), so offer it only on
-  // claude-native sessions. Selected/typed, it sends as plaintext to the
-  // vendor TUI (see submit) — the forwarder relays its answer to the overlay.
-  const showBtw = sessionHarness === "claude-native";
   const skillPrefix = skillInvocationPrefix(sessionHarness);
-  // /side is a Codex Code CLI built-in (ephemeral fork side chat), so offer it
-  // only on codex-native sessions. Selected/typed, it sends as plaintext to the
-  // vendor turn path (see submit); the runner opens the fork as a sub-agent chat.
   const canStartSideChat = useCanStartSideChat(composerSessionId, permissionLevel);
-  const showSide = supportsSideChat(sessionHarness, canStartSideChat);
   // "Run a workflow" opens a dialog that asks for the goal, or a saved workflow's
   // details, and sends the workflow. The "+" menu offers it, and so does the
   // Tasks tab's empty state, which reaches it through the registry below.
@@ -3014,87 +2882,44 @@ function ComposerImpl(
     if (isReadOnly || composerSessionId === null) return;
     return registerStopWork(composerSessionId, () => stopRef.current());
   }, [isReadOnly, composerSessionId]);
-  const showGoal =
-    composerSessionId !== null &&
-    (showGoalControl || showClaudeGoalControl || showPollyCodexGoalControl);
-  // The built-ins this session offers; a gated-off one leaves a same-named
-  // custom command to run as a skill.
-  const offeredBuiltinCommands = useMemo(
-    () =>
-      buildSlashCommandMap(
-        [],
-        showEffort,
-        showModel,
-        showCompact,
-        showBtw,
-        showSide,
-        skillPrefix,
-        supportsModelReset,
-        composerSessionId !== null,
-        showClear,
-        showCodexApprovalMode,
-        showRewind,
-        showGoal,
-      ),
+  // What this session's commands are offered against. Plain data, so the
+  // catalog below is rebuilt only when one of these facts changes.
+  const commandSession = useMemo<ChatCommandSession>(
+    () => ({
+      started: composerSessionId !== null,
+      harness: sessionHarness,
+      nativeWrapper: isNativeWrapper,
+      serverInfo: composerServerInfo,
+      effortControl: showEffort,
+      modelPicker: showModels,
+      modelReset: supportsModelReset,
+      approvalModeControl: showCodexApprovalMode,
+      goalControl: showGoalControl || showClaudeGoalControl || showPollyCodexGoalControl,
+      canStartSideChat,
+    }),
     [
-      showEffort,
-      showModel,
-      showCompact,
-      showBtw,
-      showSide,
-      skillPrefix,
-      supportsModelReset,
       composerSessionId,
-      showClear,
+      sessionHarness,
+      isNativeWrapper,
+      composerServerInfo,
+      showEffort,
+      showModels,
+      supportsModelReset,
       showCodexApprovalMode,
-      showRewind,
-      showGoal,
+      showGoalControl,
+      showClaudeGoalControl,
+      showPollyCodexGoalControl,
+      canStartSideChat,
     ],
   );
-  const goalBuiltinNames = useMemo(() => new Set(showGoal ? ["/goal"] : []), [showGoal]);
-  const commandSkills = useMemo(
+  // The session's built-ins and skills: the menu, the tint, and what a submitted line runs.
+  const commandCatalog = useMemo(
     () =>
-      showGoal && skillPrefix === "/"
-        ? skills.filter((skill) => skill.name.toLowerCase() !== "goal")
-        : skills,
-    [skills, showGoal, skillPrefix],
+      buildSlashCatalog({ commands: CHAT_COMMANDS, session: commandSession, skills, skillPrefix }),
+    [commandSession, skills, skillPrefix],
   );
-  const skillCommands = useMemo(
-    () => buildSkillCommandMap(skills, skillPrefix),
-    [skills, skillPrefix],
-  );
-  const slashCommands = useMemo(
-    () => ({
-      ...offeredBuiltinCommands,
-      ...buildSkillCommandMap(commandSkills, skillPrefix),
-    }),
-    [offeredBuiltinCommands, commandSkills, skillPrefix],
-  );
-  const slashCommandNames = useMemo(() => Object.keys(slashCommands), [slashCommands]);
-  // Submission lowercases the first word before matching a built-in, so `/Goal` runs too. Not
-  // `/btw` or Codex's `/side`: they go out as typed to case-sensitive handlers.
-  const anyCaseBuiltinNames = useMemo(
-    () =>
-      Object.keys(offeredBuiltinCommands).filter(
-        (name) => name !== "/btw" && !(name === "/side" && usesNativeSideChatFork(sessionHarness)),
-      ),
-    [offeredBuiltinCommands, sessionHarness],
-  );
-  // Skills always need an optional argument fill-in so the user can
-  // type extra context after the name; built-in commands keep their
-  // existing fill/execute split.
-  const slashCommandsWithArgs = useMemo(
-    () =>
-      buildSlashCommandWithArgsSet(
-        commandSkills,
-        showEffort,
-        showModel,
-        showBtw,
-        showSide,
-        skillPrefix,
-      ),
-    [commandSkills, showEffort, showModel, showBtw, showSide, skillPrefix],
-  );
+  const slashCommands = commandCatalog.menu;
+  const slashCommandNames = commandCatalog.names;
 
   const nativeShell = permissionPending
     ? null
@@ -3188,7 +3013,7 @@ function ComposerImpl(
     // With context the text goes out as typed, so only exact-case commands run.
     anyCaseCommandNames: carriesMessageContext(draft, files, sendContext)
       ? []
-      : anyCaseBuiltinNames,
+      : commandCatalog.anyCaseNames,
     enabled: draft.quotes.length === 0 && files.length === 0,
     // Files go out as separate blocks, so the message is no longer a lone `!` text.
     shellEnabled: files.length === 0,
@@ -3317,245 +3142,64 @@ function ComposerImpl(
     if (conversationId) setSessionDraft(conversationId, { text: "", files: [] });
   }, [restoredSendDraft, conversationId, settledConversationId, replaceText, draft]);
 
-  /**
-   * Execute a slash command by name + optional argument string.
-   * Clears the input and error state on success (or sets an error on
-   * bad usage). Returns ``true`` when the command was recognised.
-   */
-  const executeSlashCommand = (cmd: string, arg: string): boolean => {
-    switch (cmd) {
-      case "/goal": {
-        dirtyRef.current = true;
-        setValue("");
-        setCommandError(null);
-        setGoalDialogOpen(true);
-        return true;
-      }
-      case "/new": {
-        if (arg) {
-          setCommandError("/new does not accept arguments");
-          return true;
-        }
-        dirtyRef.current = true;
-        setValue("");
-        setCommandError(null);
-        onNewSession();
-        return true;
-      }
-      case "/clear": {
-        if (!showClear) {
-          setCommandError("/clear is not supported for this agent type");
-          return true;
-        }
-        if (arg) {
-          setCommandError("/clear does not accept arguments");
-          return true;
-        }
-        dirtyRef.current = true;
-        setValue("");
-        setCommandError(null);
-        void useChatStore
-          .getState()
-          .clearContext()
-          .catch((err: unknown) => {
-            setCommandError(err instanceof Error ? err.message : "Clear failed");
-          });
-        return true;
-      }
-      case "/rewind": {
-        if (!showRewind || !composerSessionId) {
-          setCommandError("/rewind is not supported for this agent type");
-          return true;
-        }
-        if (arg) {
-          setCommandError("/rewind does not accept arguments");
-          return true;
-        }
-        dirtyRef.current = true;
-        setValue("");
-        setCommandError(null);
-        setRewindPickerOpen(true);
-        return true;
-      }
-      case "/compact": {
-        if (!showCompact) {
-          setCommandError("/compact is not supported for this agent type");
-          return true;
-        }
-        if (
-          (sessionHarness === "codex-native" ||
-            sessionHarness === "claude-sdk" ||
-            sessionHarness === "pi-native") &&
-          arg
-        ) {
-          const harnessName = {
-            "codex-native": "Codex",
-            "pi-native": "Pi",
-            "claude-sdk": "Claude SDK",
-          }[sessionHarness];
-          setCommandError(`/compact does not accept arguments for ${harnessName}`);
-          return true;
-        }
-        const chat = useChatStore.getState();
-        if (
-          sessionHarness === "codex-native" &&
-          (chat.status === "streaming" || chat.sessionStatus === "running") &&
-          !shouldQueueSend(
-            chat.conversationId,
-            chat.status,
-            chat.sessionStatus,
-            chat.queuedMessages,
-            readAlwaysSteer(),
-          )
-        ) {
-          toast.error("Compact is disabled while a chat is in progress", { richColors: true });
-          return true;
-        }
-        dirtyRef.current = true;
-        setValue("");
-        setCommandError(null);
-        if (
-          sessionHarness === "claude-native" ||
-          sessionHarness === "claude-sdk" ||
-          sessionHarness === "codex-native" ||
-          sessionHarness === "pi-native"
-        ) {
-          // Use the message queue; the store dispatches SDK, Codex and Pi as controls.
-          const command = arg ? `/compact ${arg}` : "/compact";
-          appendEntry(command);
-          onSend(command);
-          return true;
-        }
-        void useChatStore
-          .getState()
-          .compact()
-          .catch((err: unknown) => {
-            setCommandError(err instanceof Error ? err.message : "Compact failed");
-          });
-        return true;
-      }
-      case "/effort": {
-        if (!showEffort) return false;
-        const valid = [...effortLevels, "default"];
-        if (!arg || !valid.includes(arg.toLowerCase())) {
-          setCommandError(`Usage: /effort ${valid.join(" | ")}`);
-          return true;
-        }
-        const level = arg.toLowerCase() === "default" ? null : arg.toLowerCase();
-        dirtyRef.current = true;
-        setValue("");
-        setCommandError(null);
-        void useChatStore
-          .getState()
-          .setEffort(level)
-          .catch((err: unknown) => {
-            setCommandError(err instanceof Error ? err.message : "Failed to set effort");
-          });
-        return true;
-      }
-      case "/model": {
-        // The command guard checks only the "/model" token, so both bare
-        // gateway ids ("databricks-gpt-5-4") and provider-prefixed ids
-        // ("anthropic/claude-opus-4-8") reach here as the argument.
-        if (!showModel) return false;
-        const target = arg.trim();
-        if (!target) {
-          const { sessionModelOverride, llmModel } = useChatStore.getState();
-          const current = sessionModelOverride
-            ? `${sessionModelOverride} (override)`
-            : (llmModel ?? "agent default");
-          setCommandError(
-            `Model: ${current}\nUsage: /model <name>${supportsModelReset ? " | default" : ""}`,
-          );
-          return true;
-        }
-        const reset = ["default", "off", "reset"].includes(target.toLowerCase());
-        if (reset && !supportsModelReset) {
-          setCommandError(
-            "This session does not support resetting the model. Choose a model with /model <name>.",
-          );
-          return true;
-        }
-        dirtyRef.current = true;
-        setValue("");
-        setCommandError(null);
-        // Confirmation is a durable `[System: model changed to X]` note the
-        // server appends to the transcript (see _persist_model_change_note) —
-        // not a transient composer hint. Surface only failures inline here.
-        // Native reported-model sessions additionally show the pending
-        // indicator until the harness's own report settles the ask.
-        const harness = useChatStore.getState().sessionHarness;
-        void useChatStore
-          .getState()
-          .setModel(reset ? null : target, {
-            expectConfirmation: harness === "claude-native" || harness === "codex-native",
-          })
-          .catch((err: unknown) => {
-            setCommandError(err instanceof Error ? err.message : "Failed to set model");
-          });
-        return true;
-      }
-      case "/context": {
-        const state = useChatStore.getState();
-        const { contextWindow, llmModel, sessionModelOverride, tokensUsed, blocks } = state;
-        const lines: string[] = [];
-        if (sessionModelOverride) lines.push(`Model: ${sessionModelOverride} (override)`);
-        else if (llmModel) lines.push(`Model: ${llmModel}`);
-        // contextWindow > 0 keeps a zero window out of the division (0/0 → "NaN%").
-        if (tokensUsed != null && contextWindow != null && contextWindow > 0) {
-          const pct = Math.min(tokensUsed / contextWindow, 1);
-          const filled = Math.round(pct * 20);
-          const bar = "█".repeat(filled) + "░".repeat(20 - filled);
-          const pctStr = (pct * 100).toFixed(1);
-          lines.push(
-            `${tokensUsed.toLocaleString()} / ${contextWindow.toLocaleString()} tokens (${pctStr}%)`,
-          );
-          lines.push(bar);
-        } else if (tokensUsed != null) {
-          lines.push(`${tokensUsed.toLocaleString()} tokens`);
-          lines.push("(Context window size unknown)");
-        } else {
-          lines.push("No usage data yet — send a message first.");
-        }
-        lines.push(`Items in context: ${blocks.length}`);
-        setCommandError(lines.join("\n"));
-        return true;
-      }
-      case "/mcp":
-        if (arg) setCommandError("Usage: /mcp");
-        return true;
-      case "/permissions": {
-        // Claude's /permissions edits tool rules, not the mode, so it reaches the CLI.
-        if (!showCodexApprovalMode) return false;
-        if (arg) {
-          setCommandError("/permissions does not accept arguments");
-          return true;
-        }
-        if (!permissionControlInteractive || configBusy) {
-          setCommandError(
-            !isOwnerLevel(permissionLevel)
-              ? "Only the session owner can change the permission mode"
-              : "The permission mode can't be changed right now",
-          );
-          return true;
-        }
-        dirtyRef.current = true;
-        setValue("");
-        setCommandError(null);
-        setPermissionPickerOpenNonce((n) => n + 1);
-        return true;
-      }
-      case "/help": {
-        const lines = Object.entries(slashCommands).map(([name, desc]) => `${name} — ${desc}`);
-        setCommandError(lines.join("\n"));
-        return true;
-      }
-      default:
-        setCommandError(
-          `Unknown command: ${cmd}. Available: ${Object.keys(slashCommands).join(", ")}`,
-        );
-        return false;
-    }
+  // A generic (non-Codex) side chat forks the conversation and runs it on the
+  // SAME host/sandbox as the source (no new sandbox), then opens it as a rail
+  // tab; the typed text seeds the new side chat's composer so it isn't fired
+  // at a still-launching runner. Codex forks in-process instead (its /side
+  // reaches the runner as plaintext).
+  const openGenericSideChat = (question: string) => {
+    const sourceId = useChatStore.getState().conversationId;
+    if (sourceId === null || pendingSideChatSessionsRef.current.has(sourceId)) return;
+    pendingSideChatSessionsRef.current.add(sourceId);
+    setCommandError(null);
+    createSideChat(sourceId)
+      .then(
+        ({ childSessionId }) => {
+          // Clear the composer only once the side chat exists, so a failed
+          // create keeps the user's typed question instead of dropping it.
+          dirtyRef.current = true;
+          setValue("");
+          useChatStore.getState().openSideChatWithDraft(childSessionId, question, sourceId);
+        },
+        // Surface the failure as a toast, not an inline composer error; the
+        // composer text is left intact for a retry.
+        () => toast.error("Couldn't start a side chat for this session."),
+      )
+      .finally(() => {
+        pendingSideChatSessionsRef.current.delete(sourceId);
+      });
+  };
+
+  // What a submitted command may read and do. The commands are declared in CHAT_COMMANDS.
+  const commandComposer: ChatCommandComposer = {
+    session: commandSession,
+    commands: slashCommands,
+    effortLevels,
+    modelPickerReady: showModels && codexModelOptions.length > 0,
+    approvalModeRefusal:
+      permissionControlInteractive && !configBusy
+        ? null
+        : !isOwnerLevel(permissionLevel)
+          ? "Only the session owner can change the permission mode"
+          : "The permission mode can't be changed right now",
+    sideChatPending: () =>
+      pendingSideChatSessionsRef.current.has(useChatStore.getState().conversationId ?? ""),
+    clearDraft: () => {
+      dirtyRef.current = true;
+      setValue("");
+    },
+    showNotice: setCommandError,
+    send: (text) => {
+      appendEntry(text);
+      onSend(text);
+    },
+    startNewSession: onNewSession,
+    openGoalDialog: () => setGoalDialogOpen(true),
+    openRewindPicker: () => setRewindPickerOpen(true),
+    openApprovalModePicker: () => setPermissionPickerOpenNonce((n) => n + 1),
+    openModelPicker: () => setPickerOpenNonce((n) => n + 1),
+    openSideChat: openGenericSideChat,
+    refreshGoal: refreshGoalAfterActivity,
   };
 
   const completeMenuSelection = (cmd: string) => {
@@ -3570,28 +3214,25 @@ function ComposerImpl(
     setCommandError("Send this command again once Arca is back online.");
   };
 
-  // Skills insert at the caret; Enter/click executes standalone no-argument built-ins.
+  // A skill completes at the caret; a built-in does what its declaration says.
   const applyMenuSelection = (cmd: string) => {
-    if (cmd === "/mcp" && !slashCompletion.inline) {
-      setValue("/mcp");
+    const selection = slashCompletion.inline ? "complete" : commandCatalog.selection(cmd);
+    const command = commandCatalog.command(cmd);
+    if (selection === "complete-bare") {
+      setValue(cmd);
       dirtyRef.current = true;
-      return;
-    }
-    if (slashCompletion.inline || slashCommandsWithArgs.has(cmd)) {
+    } else if (selection === "complete" || command === undefined) {
       completeMenuSelection(cmd);
     } else if (sendReconnectsArca) {
       completeMenuSelection(cmd);
       holdCommandForArca();
     } else {
-      // Execute immediately — no argument needed.
-      // /compact clears its draft only after the busy guard accepts it.
-      if (cmd !== "/compact") setValue("");
+      if (selection === "run") setValue("");
       setCommandError(null);
-      executeSlashCommand(cmd, "");
+      command.run?.({ name: cmd, args: "" }, commandComposer);
     }
   };
 
-  const skillLabels = useMemo(() => skillDisplayNames(skills, skillPrefix), [skills, skillPrefix]);
   const selectedAgent = agents?.find((agent) => agent.id === boundAgentId);
   const registryEnabled =
     composerServerInfo !== "loading" && !!composerServerInfo.enabled_connections?.includes("mcp");
@@ -3713,17 +3354,20 @@ function ComposerImpl(
     liveMcp,
   ]);
 
-  const slashCompletionCommands = mcpPanelRequested
-    ? { "/mcp": BUILTIN_SLASH_COMMANDS["/mcp"]! }
-    : slashCommands;
+  // While the draft is exactly `/mcp`, the menu shows only that command's panel.
+  const mcpCommand = mcpPanelRequested ? commandCatalog.command("/mcp") : undefined;
+  const slashCompletionCommands =
+    mcpCommand !== undefined
+      ? { [mcpCommand.name]: describeSlashCommand(mcpCommand, commandSession) }
+      : slashCommands;
 
   // Complete the token at the caret; inline suggestions only insert skills.
   const slashCompletion = useSlashCompletion({
     text: value,
     commands: slashCompletionCommands,
-    skills: skillCommands,
-    builtinNames: goalBuiltinNames,
-    labels: skillLabels,
+    skills: commandCatalog.skills,
+    builtinNames: commandCatalog.claimedNames,
+    labels: commandCatalog.labels,
     textareaRef,
     prefix: skillPrefix,
     status: skillsStatus,
@@ -3931,19 +3575,16 @@ function ComposerImpl(
       return;
     }
 
-    const skill = onSendSlashCommand
-      ? matchSlashCommandInvocation(trimmed, slashCommandNames)
-      : null;
-    const parts = trimmed.split(/\s+/);
-    const cmd = parts[0].toLowerCase();
-    const opensGenericSideChat =
-      cmd === "/side" &&
-      !usesNativeSideChatFork(sessionHarness) &&
-      !carriesMessageContext(draft, files, sendContext) &&
-      (skill === null || skill.command === parts[0]);
+    // What the draft runs: a built-in, a skill the server resolves, or a plain
+    // message. A draft carrying a quote, attachment, tag or review comment is
+    // always a message.
+    const submission: SlashSubmission<ChatCommandSession, ChatCommandComposer> =
+      carriesMessageContext(draft, files, sendContext)
+        ? { kind: "message" }
+        : resolveSlashSubmission(commandCatalog, trimmed, onSendSlashCommand !== undefined);
     if (
-      opensGenericSideChat &&
-      pendingSideChatSessionsRef.current.has(useChatStore.getState().conversationId ?? "")
+      submission.kind === "command" &&
+      submission.command.ignoresSubmit?.(submission.invocation, commandComposer)
     )
       return;
 
@@ -3952,116 +3593,33 @@ function ComposerImpl(
     // guard so guarded no-ops don't emit, matching the disabled Send button.
     trackClick("chat.composer.send", "button");
 
-    // A generic (non-Codex) side chat forks the conversation and runs it on the
-    // SAME host/sandbox as the source (no new sandbox), then opens it as a rail
-    // tab; the typed text seeds the new side chat's composer so it isn't fired
-    // at a still-launching runner. Codex forks in-process instead (its /side
-    // reaches the runner as plaintext).
-    const openGenericSideChat = (question: string) => {
-      const sourceId = useChatStore.getState().conversationId;
-      if (sourceId === null || pendingSideChatSessionsRef.current.has(sourceId)) return;
-      pendingSideChatSessionsRef.current.add(sourceId);
-      setCommandError(null);
-      createSideChat(sourceId)
-        .then(
-          ({ childSessionId }) => {
-            // Clear the composer only once the side chat exists, so a failed
-            // create keeps the user's typed question instead of dropping it.
-            dirtyRef.current = true;
-            setValue("");
-            useChatStore.getState().openSideChatWithDraft(childSessionId, question, sourceId);
-          },
-          // Surface the failure as a toast, not an inline composer error; the
-          // composer text is left intact for a retry.
-          () => toast.error("Couldn't start a side chat for this session."),
-        )
-        .finally(() => {
-          pendingSideChatSessionsRef.current.delete(sourceId);
-        });
-    };
-
-    // Slash command path: text that reads as "/name ..." (not a file path) or
-    // invokes a known catalog skill by its full name, with no attachments.
-    // Built-ins run locally; anything unhandled falls through to plaintext.
-    let goalMessage: string | null = null;
-    if (
-      (skill !== null || isSlashCommandText(trimmed)) &&
-      !carriesMessageContext(draft, files, sendContext)
-    ) {
-      const arg = parts[1] ?? "";
-      const sendSkill = (match: { command: string; args: string }) => {
-        appendEntry(trimmed);
-        onSendSlashCommand?.(match.command.slice(1), match.args);
-        dirtyRef.current = true;
-        setValue("");
-        setCommandError(null);
-      };
+    // Set when a built-in forwards itself to the agent as text; it then joins
+    // the plain send path below.
+    let forwarded: ForwardedCommand | null = null;
+    if (submission.kind !== "message") {
       // Commands that run here or as a `slash_command` event can't wait in the queue for
       // the host; plain slash text below still goes through `onSend`, which queues it.
       const runCommand = (run: () => void) => {
         if (sendReconnectsArca) holdCommandForArca();
         else run();
       };
-      // A multi-word catalog skill outranks a built-in that matches only its
-      // first word: "/Help Desk summarize" invokes the skill, not /help.
-      if (skill !== null && skill.command !== parts[0]) {
-        runCommand(() => sendSkill(skill));
-        return;
-      }
-      if (cmd === "/goal" && showGoal && arg) {
-        goalMessage = `/goal ${trimmed.slice(parts[0].length).trim()}`;
-      }
-      // Bare "/model" when the session has a switchable model (claude-native):
-      // sent as plaintext it would open Claude's interactive selector inside the
-      // vendor TUI, which the web UI can't render — the session just blocks. Open
-      // the composer's config gear modal (which owns the Model dropdown) instead
-      // and let the user choose there. "/model <name>" takes the builtin route
-      // below to setModel — the same write the modal makes.
-      //
-      // Runner-backed catalogs (now including claude-native) can arrive after
-      // bind. Until rows exist, fall through to the builtin "/model" handler,
-      // which surfaces the current model as a read-only hint instead of opening
-      // a model-less modal. ("/model <name>" still routes to setModel there.)
-      const canOpenModelPicker = codexModelOptions.length > 0;
-      if (cmd === "/model" && !arg && showModels && canOpenModelPicker) {
+      if (submission.kind === "skill") {
+        // Known skill on an in-process session: send a `slash_command` event so
+        // the server resolves it. Native-terminal sessions have no
+        // `onSendSlashCommand`; their vendor TUI loads the skill from plaintext.
         runCommand(() => {
+          appendEntry(trimmed);
+          onSendSlashCommand?.(submission.name, submission.args);
           dirtyRef.current = true;
           setValue("");
           setCommandError(null);
-          setPickerOpenNonce((n) => n + 1);
         });
         return;
       }
-      // /btw is a built-in for menu/autocomplete purposes only — it is NOT
-      // executed locally. It must reach the vendor TUI as plaintext so Claude
-      // Code opens its side chat and the forwarder relays the answer to the
-      // web overlay; fall through to the plaintext send path below.
-      if (
-        cmd !== "/btw" &&
-        cmd !== "/side" &&
-        !(cmd === "/goal" && arg) &&
-        cmd in offeredBuiltinCommands
-      ) {
-        runCommand(() =>
-          executeSlashCommand(
-            cmd,
-            cmd === "/compact" ? trimmed.slice(parts[0].length).trim() : arg,
-          ),
-        );
-        return;
-      }
-      // /side opens a side chat. Codex forks in-process (falls through to the
-      // plaintext path so its runner forks); every other harness forks
-      // server-side here into an empty side chat, carrying the typed question.
-      if (opensGenericSideChat) {
-        runCommand(() => openGenericSideChat(trimmed.slice(cmd.length).trim()));
-        return;
-      }
-      // Known skill on an in-process session: send a `slash_command` event so
-      // the server resolves it. Native-terminal sessions have no
-      // `onSendSlashCommand`; their vendor TUI loads the skill from plaintext.
-      if (skill !== null && !(cmd === "/goal" && showGoal)) {
-        runCommand(() => sendSkill(skill));
+      const { command, invocation } = submission;
+      forwarded = command.forward?.(invocation, commandComposer) ?? null;
+      if (forwarded === null) {
+        runCommand(() => command.run?.(invocation, commandComposer));
         return;
       }
     }
@@ -4073,7 +3631,7 @@ function ComposerImpl(
     // one tool hint at the end.
     const outgoing = buildOutgoingMessage(
       draft,
-      goalMessage ?? authoredOutgoingText(fullText, trimmed),
+      forwarded?.text ?? authoredOutgoingText(fullText, trimmed),
       sendContext,
     );
     // Sending while a prior response is streaming is fine — the
@@ -4086,7 +3644,7 @@ function ComposerImpl(
       onSend(outgoing.text, sendFiles, outgoing.replyDraft);
     } else {
       onSend(outgoing.text, sendFiles);
-      if (goalMessage) refreshGoalAfterActivity();
+      forwarded?.afterSend?.();
     }
     dirtyRef.current = true;
     clearComposerAfterSend(resetNativeInputSession);
@@ -4545,7 +4103,7 @@ function ComposerImpl(
             ) : undefined,
           beforeInput: (
             <>
-              {showRewind && composerSessionId && (
+              {commandCatalog.command("/rewind") !== undefined && composerSessionId && (
                 <RewindPicker
                   sessionId={composerSessionId}
                   open={rewindPickerOpen}

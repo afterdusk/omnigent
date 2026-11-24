@@ -55,7 +55,6 @@ import { useRequestedComposerEngine } from "@/components/composer/engine/compose
 import { ComposerMicButton } from "@/components/ComposerMicButton";
 import { FileMentionMenu } from "@/components/FileMentionMenu";
 import {
-  BUILTIN_SLASH_COMMANDS,
   SlashCommandMenu,
   isSlashCommandText,
   matchSlashCommandInvocation,
@@ -118,6 +117,8 @@ import {
   usesNativeSideChatFork,
 } from "@/lib/sideChat";
 import { parentIdFromLabels } from "@/lib/sessionHost";
+import { describeSlashCommand } from "@/lib/slashCommands/catalog";
+import { helpCommand } from "@/lib/slashCommands/chatCommands";
 import { readOnlyReasonForSessionLabels } from "@/lib/sessionCapabilities";
 import {
   appendReplyQuote,
@@ -792,7 +793,7 @@ function useSideChatCommandCatalog({
   const skillPrefix = skillInvocationPrefix(harness);
   const sideChatBuiltins = useMemo<Record<string, string>>(() => {
     const builtins: Record<string, string> = {};
-    if (!nativeSession) builtins["/help"] = BUILTIN_SLASH_COMMANDS["/help"];
+    if (!nativeSession) builtins[helpCommand.name] = describeSlashCommand(helpCommand, undefined);
     return builtins;
   }, [nativeSession]);
   // A skill whose command exactly matches a built-in can never run (the built-in

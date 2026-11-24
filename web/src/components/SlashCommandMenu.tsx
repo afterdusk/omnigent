@@ -15,35 +15,8 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { MobileMenuGlassSurface } from "./MobileMenuGlassSurface";
 
-/**
- * Built-in slash commands the web UI recognises directly. Each entry
- * maps a command name (lower-case, with leading slash) to a
- * human-readable description shown in the suggestions menu and
- * ``/help`` listing. The full set surfaced in the menu also
- * includes ``/skill-name`` entries derived from the session's
- * available skills (see ``buildSlashCommandMap`` in ChatPage). Lives
- * here (not ChatPage) so the menu can section rows into Commands vs
- * Skills without importing ChatPage — which imports NewChatDialog,
- * which imports this menu.
- */
-export const BUILTIN_SLASH_COMMANDS: Record<string, string> = {
-  "/compact": "Compact conversation context to free up space",
-  "/clear": "Clear the context and continue in a new chat on the same machine",
-  "/rewind": "Rewind the conversation to an earlier prompt and edit it",
-  "/context": "Show context window usage for this session",
-  "/effort": "Set reasoning effort: /effort low | medium | high | default",
-  "/model": "Switch the model for this session: /model <name>",
-  "/mcp": "Show MCP servers enabled for this session",
-  "/permissions": "Change the approval mode for this session",
-  "/goal": "View or set the goal for this session",
-  "/new": "Start a blank session in the same project",
-  "/btw": "Ask a side question — answered in a dismissable overlay, not saved to the conversation",
-  "/side":
-    "Start a side chat: an ephemeral fork opened as its own sub-agent chat, kept out of this conversation",
-  "/help": "Show available slash commands",
-};
-
-const DEFAULT_BUILTIN_NAMES = new Set(Object.keys(BUILTIN_SLASH_COMMANDS));
+// A composer names its built-ins; with none named, every row is a skill.
+const NO_BUILTIN_NAMES: ReadonlySet<string> = new Set();
 const NO_SKILLS_WARNINGS: readonly string[] = [];
 // First token must read as a command name (`/cross-review`,
 // `/dev-productivity:simplify`) — letters/digits then word chars, `:`, `-`.
@@ -145,7 +118,7 @@ export function skillMenuDescription(skill: {
 export function rankedSlashCommandNames(
   commands: Record<string, string>,
   query: string,
-  builtinNames: ReadonlySet<string> = DEFAULT_BUILTIN_NAMES,
+  builtinNames: ReadonlySet<string> = NO_BUILTIN_NAMES,
   labels: Readonly<Record<string, string>> = {},
 ): string[] {
   const q = query.toLowerCase();
@@ -747,7 +720,7 @@ export function SlashCommandMenu({
   placement = "above",
   onSelect,
   commands,
-  builtinNames = DEFAULT_BUILTIN_NAMES,
+  builtinNames = NO_BUILTIN_NAMES,
   labels,
   skillsStatus,
   skillsWarnings = NO_SKILLS_WARNINGS,

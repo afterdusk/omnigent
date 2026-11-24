@@ -12,7 +12,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type McpServerRow,
   matchSlashCommandInvocation,
-  BUILTIN_SLASH_COMMANDS,
   rankedSlashCommandNames,
   skillDisplayNames,
   skillMenuDescription,
@@ -23,8 +22,9 @@ afterEach(cleanup);
 
 describe("builtin command matching", () => {
   it("matches /new by its command name rather than a display alias", () => {
-    expect(rankedSlashCommandNames(BUILTIN_SLASH_COMMANDS, "n")).toContain("/new");
-    expect(rankedSlashCommandNames(BUILTIN_SLASH_COMMANDS, "sess")).not.toContain("/new");
+    const commands = { "/new": "Start a blank session in the same project" };
+    expect(rankedSlashCommandNames(commands, "n")).toContain("/new");
+    expect(rankedSlashCommandNames(commands, "sess")).not.toContain("/new");
   });
 });
 
@@ -62,6 +62,7 @@ const props = {
   activeIndex: -1,
   onSelect: vi.fn(),
   commands: { "/help": "Show help" },
+  builtinNames: new Set(["/help"]),
 };
 
 describe("skill discovery state", () => {

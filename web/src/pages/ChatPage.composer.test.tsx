@@ -291,11 +291,16 @@ import { readAlwaysSteer, writeAlwaysSteer } from "@/lib/alwaysSteerPreferences"
 import { appendPromptHistoryEntry } from "@/hooks/usePromptHistory";
 import { withSessionMentionHint } from "@/lib/composerMentions";
 import {
-  BUILTIN_SLASH_COMMANDS,
   rankedSlashCommandNames,
   SlashCommandMenu,
   slashCommandMatches,
 } from "@/components/SlashCommandMenu";
+import { CHAT_COMMANDS } from "@/lib/slashCommands/chatCommands";
+
+// The main chat's built-ins as a menu map, in menu order.
+const BUILTIN_SLASH_COMMANDS = Object.fromEntries(
+  CHAT_COMMANDS.map((command) => [command.name, command.name]),
+);
 
 // These tests pin the slash-command suggestions menu UX in the composer:
 // (1) the first match is highlighted as soon as the menu opens, so Tab/Enter
@@ -1622,8 +1627,8 @@ describe("Composer slash-command menu", () => {
     return { clearContext, onSend: props.onSend };
   }
 
-  // Which harness and server combinations offer /clear is unit-tested on
-  // composerOffersClear (ChatPage.test.ts); these cover the composer's entry points.
+  // Which harness and server combinations offer /clear is unit-tested on the
+  // command itself (chatCommands.test.ts); these cover the composer's entry points.
   const sdkClear = { session_event_types: ["message", "clear"], session_claude_sdk_clear: true };
   it.each([
     ["claude-native", "the menu", { session_event_types: ["message", "clear"] }, null],
@@ -1677,7 +1682,7 @@ describe("Composer slash-command menu", () => {
     return { prompts, rewindToPrompt, onSend: props.onSend };
   }
 
-  // Which harnesses offer /rewind is ChatPage.test.ts's gating matrix; the
+  // Which harnesses offer /rewind is chatCommands.test.ts's gating matrix; the
   // other /rewind cases here run claude-sdk, so this one runs the native wrapper.
   it("/rewind lists the prompts and rewinds to the chosen one", async () => {
     const { prompts, rewindToPrompt, onSend } = renderRewindComposer("claude-native", {
@@ -5413,7 +5418,8 @@ describe("rankedSlashCommandNames", () => {
 
   it("keeps built-ins ahead of skills so the Commands section stays on top", () => {
     const commands = { ...BUILTIN_SLASH_COMMANDS, "/superpowers:effort-helper": "x" };
-    const ranked = rankedSlashCommandNames(commands, "effort");
+    const builtinNames = new Set(Object.keys(BUILTIN_SLASH_COMMANDS));
+    const ranked = rankedSlashCommandNames(commands, "effort", builtinNames);
     // Both /effort (builtin, prefix) and the skill (mid-string) match; the
     // builtin must rank first so the render partition stays contiguous.
     expect(ranked[0]).toBe("/effort");
