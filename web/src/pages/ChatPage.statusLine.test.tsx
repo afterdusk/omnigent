@@ -137,18 +137,22 @@ vi.mock("@/hooks/RunnerHealthProvider", async (importOriginal) => ({
   ...(await importOriginal<typeof RunnerHealthProviderModule>()),
   useSessionHostOnline: (id: string | undefined) => useSessionHostOnlineMock(id),
 }));
-vi.mock("@/lib/agentLabels", async (importOriginal) => ({
-  ...(await importOriginal<typeof AgentLabelsModule>()),
-  useBrainHarnessLabels: () => ({
-    "claude-sdk": "Claude SDK",
-    codex: "Codex",
-    cursor: "Cursor",
-    pi: "Pi",
-    antigravity: "Antigravity",
-    copilot: "Copilot",
-  }),
-  useFileMentionHarnesses: () => new Set<string>(),
-}));
+vi.mock("@/lib/agentLabels", async (importOriginal) => {
+  const { LEGACY_SESSION_CONTROLS } = await import("@/lib/sessionControls");
+  return {
+    ...(await importOriginal<typeof AgentLabelsModule>()),
+    useBrainHarnessLabels: () => ({
+      "claude-sdk": "Claude SDK",
+      codex: "Codex",
+      cursor: "Cursor",
+      pi: "Pi",
+      antigravity: "Antigravity",
+      copilot: "Copilot",
+    }),
+    useFileMentionHarnesses: () => new Set<string>(),
+    useHarnessSessionControls: () => LEGACY_SESSION_CONTROLS,
+  };
+});
 
 import { BRAIN_HARNESS_LABELS } from "@/lib/agentLabels";
 import { Composer, composerHarnessLabel, formatModelEffortStatusLabel } from "./ChatPage";

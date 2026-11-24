@@ -1,5 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { authenticatedFetch } from "@/lib/identity";
+import {
+  LEGACY_SESSION_CONTROLS,
+  parseSessionControls,
+  type SessionControlsByHarness,
+} from "@/lib/sessionControls";
 
 /**
  * Shared display-name helpers for agents and brain harnesses, used by
@@ -59,6 +64,8 @@ interface HarnessCatalogWire {
   // Setup steps keyed by EVERY harness spelling a session may declare (native
   // wrappers + installable non-picker ids), not just the picker rows in `data`.
   setup_steps?: Record<string, SetupStepWire[]>;
+  // Keyed the same way: the session controls each harness's runner carries out.
+  session_controls?: unknown;
 }
 
 export interface HarnessCatalog {
@@ -72,6 +79,8 @@ export interface HarnessCatalog {
   effortFamilies: Record<string, string>;
   /** ids the server declares ``workspace_file_mentions`` for. */
   fileMentionHarnesses: ReadonlySet<string>;
+  /** harness id → session controls its runner carries out; see {@link useHarnessSessionControls}. */
+  sessionControls: SessionControlsByHarness;
 }
 
 /** Pull each row's declared effort family; rows without one are skipped. */
@@ -109,6 +118,7 @@ export async function fetchHarnessCatalog(): Promise<HarnessCatalog> {
     acpHarnesses,
     effortFamilies: effortFamiliesFromCatalog(body.data ?? []),
     fileMentionHarnesses,
+    sessionControls: parseSessionControls(body.session_controls) ?? LEGACY_SESSION_CONTROLS,
   };
 }
 
@@ -212,6 +222,16 @@ const NO_FILE_MENTION_HARNESSES: ReadonlySet<string> = new Set<string>();
  */
 export function useFileMentionHarnesses(enabled = true): ReadonlySet<string> {
   return useHarnessCatalog((c) => c.fileMentionHarnesses, NO_FILE_MENTION_HARNESSES, enabled);
+}
+
+/**
+ * harness id → the session controls its runner carries out (``compact``,
+ * ``clear``), from ``/v1/harnesses`` ``session_controls``. Keyed by every
+ * harness id, native wrappers included. A server too old to report them, and
+ * a catalog still loading, answer with what those servers handled.
+ */
+export function useHarnessSessionControls(enabled = true): SessionControlsByHarness {
+  return useHarnessCatalog((c) => c.sessionControls, LEGACY_SESSION_CONTROLS, enabled);
 }
 
 const NO_EFFORT_FAMILIES: Record<string, string> = {};

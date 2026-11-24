@@ -80,7 +80,8 @@ import {
 } from "@/hooks/useNativeServerSwitcher";
 import { isIOSShell, onNativeSidebarDrag, setNativeServerSwitcherHidden } from "@/lib/nativeBridge";
 import { type Agent, useSessionAgent, useAgents } from "@/hooks/useAgents";
-import { useFileMentionHarnesses } from "@/lib/agentLabels";
+import { useFileMentionHarnesses, useHarnessSessionControls } from "@/lib/agentLabels";
+import { NO_SESSION_CONTROLS } from "@/lib/sessionControls";
 import { useCanStartSideChat, usePermissions, useSessionOwner } from "@/hooks/usePermissions";
 import type { NativeModelOption, Session, SessionStatus } from "@/lib/types";
 import { usePromptHistory } from "@/hooks/usePromptHistory";
@@ -126,7 +127,11 @@ import {
 } from "@/store/sessionTasksActions";
 import { isRetryableRequestError } from "@/lib/queryRetry";
 import { useTrueForAtMost } from "@/hooks/useTrueForAtMost";
-import { nativeCodingAgentForHarness, WRAPPER_LABEL_KEY } from "@/lib/nativeCodingAgents";
+import {
+  nativeCodingAgentForHarness,
+  nativeCodingAgentForWrapper,
+  WRAPPER_LABEL_KEY,
+} from "@/lib/nativeCodingAgents";
 import {
   isSideChatCommand,
   newPendingSideChatId,
@@ -2882,6 +2887,10 @@ function ComposerImpl(
     if (isReadOnly || composerSessionId === null) return;
     return registerStopWork(composerSessionId, () => stopRef.current());
   }, [isReadOnly, composerSessionId]);
+  // A native session is known by its wrapper label before its snapshot names the harness.
+  const controlsHarness =
+    sessionHarness ?? nativeCodingAgentForWrapper(wrapperLabel)?.harness ?? null;
+  const sessionControls = useHarnessSessionControls()[controlsHarness ?? ""] ?? NO_SESSION_CONTROLS;
   // What this session's commands are offered against. Plain data, so the
   // catalog below is rebuilt only when one of these facts changes.
   const commandSession = useMemo<ChatCommandSession>(
@@ -2889,6 +2898,7 @@ function ComposerImpl(
       started: composerSessionId !== null,
       harness: sessionHarness,
       nativeWrapper: isNativeWrapper,
+      controls: sessionControls,
       serverInfo: composerServerInfo,
       effortControl: showEffort,
       modelPicker: showModels,
@@ -2901,6 +2911,7 @@ function ComposerImpl(
       composerSessionId,
       sessionHarness,
       isNativeWrapper,
+      sessionControls,
       composerServerInfo,
       showEffort,
       showModels,

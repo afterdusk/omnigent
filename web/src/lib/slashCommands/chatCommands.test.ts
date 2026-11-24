@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { FALLBACK_SERVER_INFO, type ServerInfo } from "@/lib/capabilities";
+import { LEGACY_SESSION_CONTROLS } from "@/lib/sessionControls";
 import { buildSlashCatalog } from "./catalog";
 import {
   CHAT_COMMANDS,
@@ -9,12 +10,15 @@ import {
 } from "./chatCommands";
 
 // An in-process Claude SDK chat with no first message yet: the commands every
-// session gets, plus /compact and /model.
+// session gets, plus /compact and /model. A harness brings the controls its
+// runner carries out unless the test names them.
 function session(overrides: Partial<ChatCommandSession> = {}): ChatCommandSession {
+  const harness = "harness" in overrides ? (overrides.harness ?? null) : "claude-sdk";
   return {
     started: false,
-    harness: "claude-sdk",
+    harness,
     nativeWrapper: false,
+    controls: LEGACY_SESSION_CONTROLS[harness ?? ""] ?? [],
     serverInfo: FALLBACK_SERVER_INFO,
     effortControl: true,
     modelPicker: false,
@@ -120,6 +124,16 @@ describe("chat command availability", () => {
     },
   );
 
+  it("offers /clear only where the runner is reported to carry it out", () => {
+    const serverInfo = info({ session_event_types: ["clear"] });
+    // The runner clears an OpenCode session, but it is not reported, so not offered.
+    expect(offers("/clear", { harness: "opencode-native", serverInfo })).toBe(false);
+    expect(offers("/clear", { harness: "claude-native", controls: [], serverInfo })).toBe(false);
+    // A server that reports the control for another harness gets the command there.
+    const reported = { harness: "opencode-native", controls: ["compact", "clear"], serverInfo };
+    expect(offers("/clear", reported)).toBe(true);
+  });
+
   it("offers claude-sdk /clear only when the server continues it in a new session", () => {
     const sdkClear = info({ session_event_types: ["clear"], session_claude_sdk_clear: true });
     expect(offers("/clear", { harness: "claude-sdk", serverInfo: sdkClear })).toBe(true);
@@ -170,9 +184,15 @@ describe("chat command availability", () => {
     expect(offeredNames({ nativeWrapper: true })).toContain("/compact");
   });
 
-  it("offers /compact on native terminals and Claude SDK only", () => {
+  it("offers /compact only where the runner is reported to carry it out", () => {
     expect(offers("/compact")).toBe(true);
     expect(offers("/compact", { harness: "codex-native", nativeWrapper: true })).toBe(true);
+    // A native terminal is not enough: the runner has no compact handler for these.
+    expect(offers("/compact", { harness: "kiro-native", nativeWrapper: true })).toBe(false);
+    expect(offers("/compact", { harness: "goose-native", nativeWrapper: true })).toBe(false);
+    expect(offers("/compact", { harness: null, nativeWrapper: true })).toBe(false);
+    // A server that reports the control for a new harness gets the command there.
+    expect(offers("/compact", { harness: "kiro-native", controls: ["compact"] })).toBe(true);
     const others = offeredNames({ harness: "openai-agents" });
     expect(others).not.toContain("/compact");
     expect(others).toContain("/effort");

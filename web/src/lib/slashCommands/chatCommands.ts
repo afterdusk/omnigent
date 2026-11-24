@@ -23,6 +23,8 @@ export interface ChatCommandSession {
   harness: string | null;
   /** Whether the session wraps a vendor terminal UI. */
   nativeWrapper: boolean;
+  /** The session controls the runner carries out for this harness, e.g. `compact`. */
+  controls: readonly string[];
   serverInfo: ServerInfo | "loading";
   /** Whether the composer shows a reasoning-effort control. */
   effortControl: boolean;
@@ -95,7 +97,7 @@ const COMPACT_THROUGH_QUEUE: ReadonlySet<string> = new Set([
 const compact: ChatCommand = {
   name: "/compact",
   description: "Compact conversation context to free up space",
-  offered: (session) => session.nativeWrapper || session.harness === "claude-sdk",
+  offered: (session) => session.controls.includes("compact"),
   // A /compact refused while Codex is busy stays in the composer.
   menuSelection: "run-keep-draft",
   run: ({ args }, composer) => {
@@ -133,25 +135,22 @@ const compact: ChatCommand = {
 };
 
 /**
- * Whether the composer offers `/clear` for a session on `harness`.
- *
- * Claude SDK needs the server to continue the work in a new session; native
- * sessions need it to accept the clear control. Elsewhere a typed `/clear`
- * stays text.
+ * Whether the composer offers `/clear`: the runner must carry the control out
+ * for this harness, and the server must accept it. Claude SDK continues the
+ * work in a new session, which a server advertises on its own. Elsewhere a
+ * typed `/clear` stays text.
  */
-function offersClear(harness: string | null, info: ServerInfo | "loading"): boolean {
-  if (info === "loading") return false;
-  if (harness === "claude-sdk") return info.session_claude_sdk_clear === true;
-  return (
-    (harness === "claude-native" || harness === "codex-native") &&
-    !!info.session_event_types?.includes("clear")
-  );
+function offersClear({ harness, controls, serverInfo }: ChatCommandSession): boolean {
+  if (serverInfo === "loading" || !controls.includes("clear")) return false;
+  return harness === "claude-sdk"
+    ? serverInfo.session_claude_sdk_clear === true
+    : !!serverInfo.session_event_types?.includes("clear");
 }
 
 const clear: ChatCommand = {
   name: "/clear",
   description: "Clear the context and continue in a new chat on the same machine",
-  offered: (session) => offersClear(session.harness, session.serverInfo),
+  offered: offersClear,
   run: ({ args }, composer) => {
     if (args) {
       composer.showNotice("/clear does not accept arguments");

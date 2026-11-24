@@ -150,18 +150,22 @@ vi.mock("@/hooks/RunnerHealthProvider", async (importOriginal) => ({
   ...(await importOriginal<typeof RunnerHealthProviderModule>()),
   useSessionHostOnline: () => undefined,
 }));
-vi.mock("@/lib/agentLabels", async (importOriginal) => ({
-  ...(await importOriginal<typeof AgentLabelsModule>()),
-  useBrainHarnessLabels: () => ({
-    "claude-sdk": "Claude SDK",
-    codex: "Codex",
-    cursor: "Cursor",
-    pi: "Pi",
-    antigravity: "Antigravity",
-    copilot: "Copilot",
-  }),
-  useFileMentionHarnesses: () => declaredMentions.harnesses,
-}));
+vi.mock("@/lib/agentLabels", async (importOriginal) => {
+  const { LEGACY_SESSION_CONTROLS } = await import("@/lib/sessionControls");
+  return {
+    ...(await importOriginal<typeof AgentLabelsModule>()),
+    useBrainHarnessLabels: () => ({
+      "claude-sdk": "Claude SDK",
+      codex: "Codex",
+      cursor: "Cursor",
+      pi: "Pi",
+      antigravity: "Antigravity",
+      copilot: "Copilot",
+    }),
+    useFileMentionHarnesses: () => declaredMentions.harnesses,
+    useHarnessSessionControls: () => LEGACY_SESSION_CONTROLS,
+  };
+});
 
 import { Composer, detectMentionAt, mentionMarkerFor } from "./ChatPage";
 import { SESSION_MENTION_CAP, SESSION_MENTION_HINT } from "@/lib/composerMentions";

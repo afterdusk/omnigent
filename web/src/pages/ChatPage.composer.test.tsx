@@ -266,19 +266,24 @@ vi.mock("@/hooks/RunnerHealthProvider", async (importOriginal) => ({
   ...(await importOriginal<typeof RunnerHealthProviderModule>()),
   useSessionHostOnline: () => undefined,
 }));
-vi.mock("@/lib/agentLabels", async (importOriginal) => ({
-  ...(await importOriginal<typeof AgentLabelsModule>()),
-  useBrainHarnessLabels: () => ({
-    "claude-sdk": "Claude SDK",
-    codex: "Codex",
-    cursor: "Cursor",
-    pi: "Pi",
-    antigravity: "Antigravity",
-    copilot: "Copilot",
-    grok: "Grok Build",
-  }),
-  useFileMentionHarnesses: () => new Set<string>(),
-}));
+vi.mock("@/lib/agentLabels", async (importOriginal) => {
+  const { LEGACY_SESSION_CONTROLS } = await import("@/lib/sessionControls");
+  return {
+    ...(await importOriginal<typeof AgentLabelsModule>()),
+    useBrainHarnessLabels: () => ({
+      "claude-sdk": "Claude SDK",
+      codex: "Codex",
+      cursor: "Cursor",
+      pi: "Pi",
+      antigravity: "Antigravity",
+      copilot: "Copilot",
+      grok: "Grok Build",
+    }),
+    useFileMentionHarnesses: () => new Set<string>(),
+    // The controls a server reports for the built-in harnesses.
+    useHarnessSessionControls: () => LEGACY_SESSION_CONTROLS,
+  };
+});
 vi.mock("@/lib/goalApi", async (importOriginal) => ({
   ...(await importOriginal<typeof GoalApiModule>()),
   getGoal: vi.fn(),
@@ -296,6 +301,9 @@ import {
   slashCommandMatches,
 } from "@/components/SlashCommandMenu";
 import { CHAT_COMMANDS } from "@/lib/slashCommands/chatCommands";
+
+// A Claude Code native session, known by its wrapper label as one is before its snapshot loads.
+const CLAUDE_NATIVE_SESSION = { isNativeWrapper: true, wrapperLabel: "claude-code-native-ui" };
 
 // The main chat's built-ins as a menu map, in menu order.
 const BUILTIN_SLASH_COMMANDS = Object.fromEntries(
@@ -1462,9 +1470,9 @@ describe("Composer slash-command menu", () => {
   });
 
   it("highlights the first match as soon as the menu opens", () => {
-    // /compact is native-wrapper-only (#1139); render a native session so it
-    // appears as the first built-in and is the default highlight.
-    render(<Composer {...composerProps({ isNativeWrapper: true })} />);
+    // /compact is offered where the runner compacts; render a Claude Code
+    // native session so it is the first built-in and the default highlight.
+    render(<Composer {...composerProps(CLAUDE_NATIVE_SESSION)} />);
     fireEvent.change(textarea(), { target: { value: "/" } });
     // Built-ins are inserted first, so "/compact" tops the list and is the
     // default highlight — the crux of the fix (was -1 / nothing selected).
@@ -1922,9 +1930,9 @@ describe("Composer slash-command menu", () => {
   });
 
   it("ArrowDown moves the highlight to the next match", () => {
-    // /compact is native-wrapper-only (#1139); render a native session so the
-    // first built-in is "/compact" and ArrowDown advances to "/context".
-    render(<Composer {...composerProps({ isNativeWrapper: true })} />);
+    // /compact is offered where the runner compacts; render a Claude Code native
+    // session so the first built-in is "/compact" and ArrowDown advances to "/context".
+    render(<Composer {...composerProps(CLAUDE_NATIVE_SESSION)} />);
     const ta = textarea();
     fireEvent.change(ta, { target: { value: "/" } });
     expect(activeRow()?.textContent).toContain("/compact");
@@ -4363,6 +4371,23 @@ describe("Composer effort slash-command visibility", () => {
     render(<Composer {...composerProps({ isNativeWrapper: false })} />);
     fireEvent.change(textarea(), { target: { value: "/" } });
     expect(screen.queryByTestId("slash-menu-item-compact")).toBeNull();
+  });
+
+  it("leaves /compact to the terminal of a native session the runner cannot compact", () => {
+    // The runner has no compact handler for Kiro, so the control could only
+    // answer "not available". The command is not offered; the text is sent.
+    const { sessionHarness } = useChatStore.getState();
+    onTestFinished(() => useChatStore.setState({ sessionHarness }));
+    useChatStore.setState({ sessionHarness: "kiro-native" });
+    const compact = vi.spyOn(useChatStore.getState(), "compact").mockResolvedValue();
+    const props = composerProps({ isNativeWrapper: true });
+    render(<Composer {...props} />);
+    fireEvent.change(textarea(), { target: { value: "/" } });
+    expect(screen.queryByTestId("slash-menu-item-compact")).toBeNull();
+    fireEvent.change(textarea(), { target: { value: "/compact" } });
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+    expect(compact).not.toHaveBeenCalled();
+    expect(props.onSend).toHaveBeenCalledExactlyOnceWith("/compact", undefined);
   });
 
   it("shows /model in suggestions for in-process and picker-backed native sessions", () => {
