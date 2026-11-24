@@ -196,10 +196,10 @@ import { useHeading, usePoweredBy } from "@/lib/branding";
 import {
   isSlashCommandText,
   matchSlashCommandInvocation,
-  skillDisplayNames,
-  skillMenuDescription,
   SlashCommandMenu,
 } from "@/components/SlashCommandMenu";
+import { buildSlashCatalog } from "@/lib/slashCommands/catalog";
+import { NEW_SESSION_COMMANDS } from "@/lib/slashCommands/newSessionCommands";
 import {
   type PendingInitialPrompt,
   beginLocalConversation,
@@ -5485,18 +5485,14 @@ function NewChatLandingContent({
   };
   // A workflow from the dialog becomes the first message, then starts the session.
   const [workflowToSend, setWorkflowToSend] = useState<string | null>(null);
-  const skillCommands = useMemo(
+  const commandCatalog = useMemo(
     () =>
-      Object.fromEntries(
-        availableSkills.map((skill) => [
-          `${skillPrefix}${skill.name}`,
-          skillMenuDescription(skill),
-        ]),
-      ),
-    [availableSkills, skillPrefix],
-  );
-  const skillLabels = useMemo(
-    () => skillDisplayNames(availableSkills, skillPrefix),
+      buildSlashCatalog({
+        commands: NEW_SESSION_COMMANDS,
+        session: undefined,
+        skills: availableSkills,
+        skillPrefix,
+      }),
     [availableSkills, skillPrefix],
   );
   // Insert the selected skill at the caret while preserving surrounding text.
@@ -5505,9 +5501,9 @@ function NewChatLandingContent({
   }
   const slashCompletion = useSlashCompletion({
     text: message,
-    commands: skillCommands,
-    skills: skillCommands,
-    labels: skillLabels,
+    commands: commandCatalog.menu,
+    skills: commandCatalog.skills,
+    labels: commandCatalog.labels,
     textareaRef,
     prefix: skillPrefix,
     status: skillsStatus,
@@ -5630,7 +5626,7 @@ function NewChatLandingContent({
   clearTaggedMentionsRef.current = resetMentions;
   // The draft snapshot is built above the hook; add the tags it owns.
   draftRef.current.mentions = { files: mentionedItems, sessions: mentionedSessions };
-  const skillCommandNames = useMemo(() => Object.keys(skillCommands), [skillCommands]);
+  const skillCommandNames = commandCatalog.names;
   const taggedMentions = useMemo(
     () =>
       presentMentions(

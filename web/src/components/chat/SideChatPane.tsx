@@ -54,13 +54,7 @@ import {
 import { useRequestedComposerEngine } from "@/components/composer/engine/composerEnginePolicy";
 import { ComposerMicButton } from "@/components/ComposerMicButton";
 import { FileMentionMenu } from "@/components/FileMentionMenu";
-import {
-  SlashCommandMenu,
-  isSlashCommandText,
-  matchSlashCommandInvocation,
-  skillDisplayNames,
-  skillMenuDescription,
-} from "@/components/SlashCommandMenu";
+import { SlashCommandMenu, isSlashCommandText } from "@/components/SlashCommandMenu";
 import { ComposerAttachments } from "@/components/ComposerAttachments";
 import { ComposerLocalReviewChips } from "@/components/composer/ComposerLocalReviewChips";
 import { ReplyDraftBlocks } from "@/components/composer/ReplyDraftBlocks";
@@ -117,8 +111,12 @@ import {
   usesNativeSideChatFork,
 } from "@/lib/sideChat";
 import { parentIdFromLabels } from "@/lib/sessionHost";
-import { describeSlashCommand } from "@/lib/slashCommands/catalog";
-import { helpCommand } from "@/lib/slashCommands/chatCommands";
+import { buildSlashCatalog, resolveSlashSubmission } from "@/lib/slashCommands/catalog";
+import {
+  SIDE_CHAT_COMMANDS,
+  type SideChatCommand,
+  type SideChatCommandComposer,
+} from "@/lib/slashCommands/sideChatCommands";
 import { readOnlyReasonForSessionLabels } from "@/lib/sessionCapabilities";
 import {
   appendReplyQuote,
@@ -747,6 +745,8 @@ interface SideChatCommandCatalogOptions {
   starting: boolean;
 }
 
+const NO_COMMANDS: readonly SideChatCommand[] = [];
+
 /** The commands and skills a side chat offers, for its composer and its sent bubbles. */
 function useSideChatCommandCatalog({
   childId,
@@ -791,42 +791,18 @@ function useSideChatCommandCatalog({
     starting: starting || (parentId !== null && parentLoading),
   });
   const skillPrefix = skillInvocationPrefix(harness);
-  const sideChatBuiltins = useMemo<Record<string, string>>(() => {
-    const builtins: Record<string, string> = {};
-    if (!nativeSession) builtins[helpCommand.name] = describeSlashCommand(helpCommand, undefined);
-    return builtins;
-  }, [nativeSession]);
-  // A skill whose command exactly matches a built-in can never run (the built-in
-  // wins), so drop it to keep the menu's labels aligned with what submitting runs.
-  const routableSkills = useMemo(
-    () => skills.filter((skill) => !Object.hasOwn(sideChatBuiltins, `${skillPrefix}${skill.name}`)),
-    [skills, skillPrefix, sideChatBuiltins],
-  );
-  const skillCommands = useMemo(
+  const commandCatalog = useMemo(
     () =>
-      Object.fromEntries(
-        routableSkills.map((skill) => [`${skillPrefix}${skill.name}`, skillMenuDescription(skill)]),
-      ),
-    [routableSkills, skillPrefix],
+      buildSlashCatalog({
+        // A native terminal side chat reads slash text itself, so nothing runs here.
+        commands: nativeSession ? NO_COMMANDS : SIDE_CHAT_COMMANDS,
+        session: undefined,
+        skills,
+        skillPrefix,
+      }),
+    [nativeSession, skills, skillPrefix],
   );
-  const skillLabels = useMemo(
-    () => skillDisplayNames(routableSkills, skillPrefix),
-    [routableSkills, skillPrefix],
-  );
-  const menuCommands = useMemo(
-    () => ({ ...sideChatBuiltins, ...skillCommands }),
-    [sideChatBuiltins, skillCommands],
-  );
-  return {
-    nativeSession,
-    skillsStatus,
-    refreshSkills,
-    skillPrefix,
-    sideChatBuiltins,
-    skillCommands,
-    skillLabels,
-    menuCommands,
-  };
+  return { nativeSession, skillsStatus, refreshSkills, skillPrefix, commandCatalog };
 }
 
 /**
@@ -844,7 +820,7 @@ function SideChatCommandsPublisher({
   session: Session | null | undefined;
   fullSession: boolean;
 }) {
-  const { menuCommands } = useSideChatCommandCatalog({
+  const { commandCatalog } = useSideChatCommandCatalog({
     childId,
     harness,
     session,
@@ -853,10 +829,9 @@ function SideChatCommandsPublisher({
     enabled: true,
     starting: false,
   });
-  const menuCommandNames = useMemo(() => Object.keys(menuCommands), [menuCommands]);
   usePublishComposerCommands(
     childId,
-    menuCommandNames,
+    commandCatalog.names,
     session ? nativeShellHarness(harness, session.permissionLevel ?? null) : null,
   );
   return null;
@@ -1250,47 +1225,44 @@ function SideChatComposer({
       : undefined,
   });
   const mentionMenuOpen = mentionOpen || mentionListingPending;
-  const {
-    nativeSession,
-    skillsStatus,
-    refreshSkills,
-    skillPrefix,
-    sideChatBuiltins,
-    skillCommands,
-    skillLabels,
-    menuCommands,
-  } = useSideChatCommandCatalog({
-    childId,
-    harness,
-    session,
-    fullSession,
-    pending,
-    enabled: !pending && ready,
-    starting,
-  });
-  // /help lists what this side chat offers; shown locally, never sent as a turn.
-  const showHelp = useCallback(() => {
-    const lines = Object.entries(menuCommands).map(([name, desc]) => `${name} — ${desc}`);
-    setCommandNotice(lines.join("\n"));
-  }, [menuCommands]);
+  const { nativeSession, skillsStatus, refreshSkills, skillPrefix, commandCatalog } =
+    useSideChatCommandCatalog({
+      childId,
+      harness,
+      session,
+      fullSession,
+      pending,
+      enabled: !pending && ready,
+      starting,
+    });
+  // What a side chat's commands may do: they show their output here, never as a turn.
+  const commandComposer: SideChatCommandComposer = {
+    commands: commandCatalog.menu,
+    showNotice: setCommandNotice,
+  };
   // Tab fills the draft with the chosen command; Enter or click runs a built-in.
   const completeMenuSelection = (cmd: string) => {
     setText(slashCompletion.complete(cmd).text);
   };
-  // Insert a chosen skill at the caret; a built-in runs immediately (no args).
+  // A skill completes at the caret; a built-in does what its declaration says.
   const applyMenuSelection = (cmd: string) => {
-    if (Object.hasOwn(sideChatBuiltins, cmd)) {
-      setText("");
-      if (cmd === "/help") showHelp();
-      return;
+    const selection = slashCompletion.inline ? "complete" : commandCatalog.selection(cmd);
+    const command = commandCatalog.command(cmd);
+    if (selection === "complete-bare") {
+      setText(cmd);
+    } else if (selection === "complete" || command === undefined) {
+      completeMenuSelection(cmd);
+    } else {
+      if (selection === "run") setText("");
+      command.run?.({ name: cmd, args: "" }, commandComposer);
     }
-    completeMenuSelection(cmd);
   };
   const slashCompletion = useSlashCompletion({
     text,
-    commands: menuCommands,
-    skills: skillCommands,
-    labels: skillLabels,
+    commands: commandCatalog.menu,
+    skills: commandCatalog.skills,
+    builtinNames: commandCatalog.claimedNames,
+    labels: commandCatalog.labels,
     textareaRef,
     prefix: skillPrefix,
     status: skillsStatus,
@@ -1309,7 +1281,7 @@ function SideChatComposer({
     onTabComplete: completeMenuSelection,
     clearText: () => setText(""),
   });
-  const menuCommandNames = useMemo(() => Object.keys(menuCommands), [menuCommands]);
+  const menuCommandNames = commandCatalog.names;
   // Codex forks from a `/side` message, so its pending text never reaches the shell; other
   // forks send it as the child's first message. Only the root's owner starts a side chat.
   // A live tab's null level means owner, so wait for the snapshot before codex's owner-only `!`.
@@ -1376,33 +1348,23 @@ function SideChatComposer({
     // A lone command token with skill discovery in flight has nothing to run
     // yet; only hold when the submission would route locally.
     if (routeLocally && slashCompletion.pendingCompletion) return;
-    const builtin = routeLocally
-      ? matchSlashCommandInvocation(trimmed, Object.keys(sideChatBuiltins))
-      : null;
-    const skill = routeLocally
-      ? matchSlashCommandInvocation(trimmed, Object.keys(skillCommands))
-      : null;
-    const runSkill = (match: { command: string; args: string }) => {
-      clearComposer(composerKey);
-      onSend();
-      void sendSlashCommand(match.command.slice(1), match.args, agentId, {
-        pinnedConversationId: childId,
-      }).finally(refreshLabels);
-    };
     // A multi-word catalog skill outranks a built-in that matches only its first
     // word ("/help desk ..." runs the skill); an exact-name collision keeps
     // built-in precedence.
-    if (skill !== null && skill.command !== trimmed.split(/\s+/)[0]) {
-      runSkill(skill);
+    const submission = routeLocally
+      ? resolveSlashSubmission(commandCatalog, trimmed, true)
+      : ({ kind: "message" } as const);
+    if (submission.kind === "skill") {
+      clearComposer(composerKey);
+      onSend();
+      void sendSlashCommand(submission.name, submission.args, agentId, {
+        pinnedConversationId: childId,
+      }).finally(refreshLabels);
       return;
     }
-    if (builtin !== null) {
+    if (submission.kind === "command") {
       setText("");
-      if (builtin.command === "/help") showHelp();
-      return;
-    }
-    if (skill !== null) {
-      runSkill(skill);
+      submission.command.run?.(submission.invocation, commandComposer);
       return;
     }
     const outgoing = files.length > 0 ? files : undefined;

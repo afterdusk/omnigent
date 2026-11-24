@@ -11,7 +11,8 @@ import type { ServerInfo } from "@/lib/capabilities";
 import { shouldQueueSend } from "@/lib/messageQueue";
 import { supportsSideChat, usesNativeSideChatFork } from "@/lib/sideChat";
 import { useChatStore } from "@/store/chatStore";
-import { firstArgument, formatCommandListing } from "./catalog";
+import { firstArgument } from "./catalog";
+import { type HelpComposer, helpCommand } from "./helpCommand";
 import type { ForwardedCommand, SlashCommand } from "./types";
 
 /** The session facts the main chat's commands are offered against. */
@@ -38,10 +39,8 @@ export interface ChatCommandSession {
 }
 
 /** What a submitted main-chat command may read and do. */
-export interface ChatCommandComposer {
+export interface ChatCommandComposer extends HelpComposer {
   session: ChatCommandSession;
-  /** The menu this composer offers, as `/help` lists it. */
-  commands: Readonly<Record<string, string>>;
   /** Reasoning efforts the session's model accepts. */
   effortLevels: readonly string[];
   /** Whether the model picker has a catalog to open on. */
@@ -51,8 +50,6 @@ export interface ChatCommandComposer {
   /** Whether this session is already creating a side chat. */
   sideChatPending: () => boolean;
   clearDraft: () => void;
-  /** Shows text under the composer; null clears it. */
-  showNotice: (text: string | null) => void;
   /** Sends `text` to the agent through the message queue. */
   send: (text: string) => void;
   startNewSession: () => void;
@@ -379,17 +376,6 @@ const side: ChatCommand = {
   forward: (_invocation, composer) =>
     usesNativeSideChatFork(composer.session.harness) ? AS_TYPED : null,
   run: ({ args }, composer) => composer.openSideChat(args),
-};
-
-/** Lists what the composer offers. Shared by every surface that shows a notice. */
-export const helpCommand: SlashCommand<
-  unknown,
-  Pick<ChatCommandComposer, "commands" | "showNotice">
-> = {
-  name: "/help",
-  description: "Show available slash commands",
-  offered: () => true,
-  run: (_invocation, composer) => composer.showNotice(formatCommandListing(composer.commands)),
 };
 
 export const CHAT_COMMANDS: readonly ChatCommand[] = [
