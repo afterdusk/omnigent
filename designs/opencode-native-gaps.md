@@ -114,7 +114,7 @@ Key surfaces discovered (all confirmed present in 1.17.7):
 
 **1. "The compact button" = the `/compact` slash command.** There is no separate
 button. `/compact` is a built-in slash command in both the web composer
-(`web` `BUILTIN_SLASH_COMMANDS["/compact"]`) and the REPL
+(`web` `CHAT_COMMANDS` in `web/src/lib/slashCommands/chatCommands.ts`) and the REPL
 (`omnigent/repl/_repl.py` `@_cmd("/compact")`). The web sends it as
 `postEvent({type:"compact"})` (`web/src/store/chatStore.ts:1253`) →
 server `_COMPACT_TYPE` (`sessions.py`) → runner control dispatch

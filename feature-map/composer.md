@@ -146,14 +146,24 @@ apply only to that side chat. See the [side-chat settings recipe](sessions.md).
   tooltip fits within the viewport width, and on touch screens the highlight
   doesn't open it.
   The main composer lists its full built-in set and the session's skills; a live
-  side chat offers a narrower menu — `/help` plus the session's skills. A built-in
+  side chat offers a narrower menu — `/help` plus the session's skills. There a
+  skill named exactly `help` gives way to the built-in at the start of a message
+  and still completes mid-sentence. A built-in
   such as `/help` is handled locally; a recognised skill routes through
   `slash_command` so it runs on an in-process harness. A built-in the session
   doesn't offer (e.g. `/compact` or `/model` where gated off) is not handled
   locally: a skill of the same name runs, otherwise the text is sent. `/side`
   is the exception: outside Codex native it always opens a side chat. A native
   terminal side chat shows no menu and sends slash text to the vendor TUI.
-  Claude Code and Codex native sessions offer `/clear` only when `/v1/info`
+  `/compact` and `/clear` are offered only where `/v1/harnesses` lists the
+  control for the session's harness under `session_controls`, which is where
+  the runner can carry it out. A native session without it does not list the
+  command and sends the typed text to its terminal: Kiro, Antigravity, Goose
+  and Kimi for `/compact`. A server that reports no `session_controls` is
+  treated as one that compacts Claude Code, Codex, OpenCode, Cursor, Pi,
+  Hermes, Qwen and Devin native sessions and claude-sdk, and clears Claude
+  Code, Codex and claude-sdk.
+  Claude Code and Codex native sessions also offer `/clear` only when `/v1/info`
   lists `clear` in `session_event_types`; claude-sdk sessions only when it
   reports `session_claude_sdk_clear`. Otherwise a typed `/clear` goes to the
   harness as text. A claude-sdk `/clear` continues in a new, empty session on
@@ -913,6 +923,15 @@ composer with its prompt`).
   incomplete catalog:
   `tests/e2e_ui/chat/test_codex_skills_menu_inventory_failure.py::test_failed_plugin_inventory_is_not_shown_as_an_empty_catalog`.
   claude-sdk `/clear` is in the `/clear` and `slash-rewind` recipe above.
+  Which sessions offer each built-in, and what a submitted line runs, is
+  component-covered, run with vitest from `web/`:
+  `web/src/lib/slashCommands/chatCommands.test.ts`,
+  `web/src/lib/slashCommands/sideChatCommands.test.ts` and
+  `web/src/lib/slashCommands/catalog.test.ts`. The runner's table of session
+  controls and its `/v1/harnesses` report are in `tests/test_session_controls.py`.
+  Manually, in a Kiro, Antigravity, Goose or Kimi native session, type `/`:
+  `/compact` is not listed, and a typed `/compact` reaches the terminal as
+  text. In a Claude Code or Codex native session it is listed and compacts.
 - **`command-and-shell-tint`:** component coverage, run with vitest from
   `web/`: `web/src/components/composer/composerHighlight.test.ts`
   (classification, including the harness-specific `!` rules),
@@ -1201,6 +1220,11 @@ node --test e2e/desktop_dictation_availability.e2e.js`): no mic against a
   [Preferences and config defaults](./preferences.md) for those boundaries.
 - Chat `/new` is local navigation, not a message to the agent. Native TUI
   `/new` is unchanged.
+- `/compact` and `/clear` follow the server's `session_controls` report, not
+  whether the session is a native terminal. Against a server too old to report
+  it the menu shows what those servers handled, so check a harness's controls
+  against a current server. How the composers offer and route commands is in
+  the [slash command design note](../designs/slash-commands.md).
 
 - The in-session and new-session composers are different surfaces. A change to
   the pill, tooltip, configuration menu, or effort picker in one does not reach
