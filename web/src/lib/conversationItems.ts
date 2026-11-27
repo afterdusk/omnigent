@@ -35,6 +35,8 @@ export interface MessageItem extends BaseItem {
   /** Explicit user action, possibly server-expanded skill instructions.
    * Independent of is_meta; client-settable by convention, not a trust signal. */
   user_authored?: boolean;
+  /** What sent a user message no human typed, e.g. `"loop"` for a /loop run. Display-only. */
+  origin?: string;
   /** Hidden durable context such as injected skill instructions. */
   is_meta?: boolean;
   /** Assistant-only marker for durable partial text from an interrupted turn. */
@@ -154,6 +156,21 @@ export interface SlashCommandItem extends BaseItem {
   model?: string;
 }
 
+export interface TerminalCommandSubmission {
+  pendingId?: string;
+  stableId?: string;
+}
+
+/** Missing means legacy; an empty object explicitly consumed no web submission. */
+export function terminalCommandSubmission(value: unknown): TerminalCommandSubmission | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  return {
+    ...(typeof record.pending_id === "string" ? { pendingId: record.pending_id } : {}),
+    ...(typeof record.stable_id === "string" ? { stableId: record.stable_id } : {}),
+  };
+}
+
 /**
  * A runner-side terminal command (`!cmd`) observed in a Claude Code
  * embedded TUI transcript. Two items per invocation: one `kind="input"`
@@ -161,6 +178,7 @@ export interface SlashCommandItem extends BaseItem {
  */
 export interface TerminalCommandItem extends BaseItem {
   type: "terminal_command";
+  submission?: { pending_id?: string; stable_id?: string };
   /** `"input"` for the command text; `"output"` for stdout/stderr. */
   kind: "input" | "output";
   /** The raw command string; present when `kind="input"`. */

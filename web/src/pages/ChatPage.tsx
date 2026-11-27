@@ -1,5 +1,6 @@
 import { clearLocalReviewContexts, usePendingLocalReviewContexts } from "@/lib/localReviewContext";
 import { buildOutgoingMessage, carriesMessageContext } from "@/lib/outgoingComposerMessage";
+import { isWarmSwitchPending } from "@/lib/warmSessionSwitch";
 import { SelectionPopup } from "@/components/chat/SelectionPopup";
 import {
   EditSentMessageContext,
@@ -135,6 +136,16 @@ import {
   usesNativeSideChatFork,
 } from "@/lib/sideChat";
 import { type ComposerSendOptions, shouldQueueSend } from "@/lib/messageQueue";
+import { formatLoopInterval, looksLikeCommand, parseLoopCommand } from "@/lib/loopCommand";
+import {
+  cancelSessionTimer,
+  LOOP_TIMER_ORIGIN,
+  runSessionTimerMutation,
+  sendLoopPrompt,
+  sessionTakesSavedTimers,
+  setSessionTimer,
+  stopSessionLoop,
+} from "@/lib/sessionTimersApi";
 import { readAlwaysSteer } from "@/lib/alwaysSteerPreferences";
 import { skillInvocationPrefix } from "@/lib/harnessSetup";
 import { readSubmitWithModEnter } from "@/lib/composerSendShortcutPreferences";
@@ -283,6 +294,8 @@ import { RewindPicker } from "@/components/RewindPicker";
 import { isFeatureEnabled, type ServerInfo } from "@/lib/capabilities";
 import { ChatPaneBody } from "@/shell/ChatPaneBody";
 import { MainTerminalSurface } from "@/shell/MainTerminalSurface";
+import { LoneChatPaneDropPreview } from "@/shell/PaneDropPreview";
+import { useFloatingPanesShown } from "@/shell/useFloatingPanes";
 import { useChatInPanes } from "@/shell/panesViewGate";
 import { UNTITLED_CONVERSATION_LABEL } from "@/shell/sidebarNav";
 import { NewChatLandingScreen } from "@/shell/NewChatDialog";
@@ -451,19 +464,29 @@ export function BtwSidechatAnswer({ answer }: { answer: string }) {
  */
 export function ChatPage() {
   const { conversationId: urlConvId } = useParams<{ conversationId: string }>();
-  // The id for every server-scoped fetch/hook — `undefined` while the URL holds
-  // a client-only temp id, so none of them hit `/v1/sessions/<temp>/*` before
-  // the session exists. `switchTo` still gets the raw `urlConvId`.
-  const sessionConvId = isTempConvId(urlConvId) ? undefined : urlConvId;
+  const activeConversationId = useChatStore((s) => s.conversationId);
+  const rebasePath = useRebasePath();
+  const warmSwitchPending = isWarmSwitchPending(activeConversationId, urlConvId, rebasePath);
+  const effectiveConvId = warmSwitchPending ? (activeConversationId ?? undefined) : urlConvId;
+  const [sessionUi, setSessionUi] = useState({ conversationId: effectiveConvId, key: 0 });
+  if (sessionUi.conversationId !== effectiveConvId) {
+    // Session creation promotes the same draft; every other switch starts fresh local UI.
+    const promoting =
+      isTempConvId(sessionUi.conversationId) &&
+      effectiveConvId !== undefined &&
+      !isTempConvId(effectiveConvId);
+    setSessionUi({ conversationId: effectiveConvId, key: sessionUi.key + (promoting ? 0 : 1) });
+  }
+  // Client-only temp ids must not reach server-scoped hooks before the session exists.
+  const sessionConvId = isTempConvId(effectiveConvId) ? undefined : effectiveConvId;
   const navigate = useNavigate();
   const { pathname, search } = useLocation();
-  const rebasePath = useRebasePath();
   const appName = useAppName();
   const {
     data: agents,
     error: agentsError,
     refetch: refetchAgents,
-  } = useAgents({ enabled: !urlConvId });
+  } = useAgents({ enabled: !effectiveConvId });
   const { data: conversationsData } = useLoadedConversations();
   const conversations = useMemo(
     () => conversationsData?.pages.flatMap((p) => p.data),
@@ -489,6 +512,7 @@ export function ChatPage() {
   // intentionally don't await it here. The store's `loadingConversation` flag
   // drives the loading UI below; `conversationLoadError` drives the error UI.
   useEffect(() => {
+    if (warmSwitchPending) return;
     // A temporary route has no client session after a reload. Return to its
     // board or the landing page so it cannot strand a read-only phantom chat.
     if (isStaleTempConvId(urlConvId)) {
@@ -502,9 +526,9 @@ export function ChatPage() {
       return;
     }
     void useChatStore.getState().switchTo(urlConvId ?? null);
-  }, [urlConvId, navigate, pathname, search, rebasePath]);
+  }, [urlConvId, warmSwitchPending, navigate, pathname, search, rebasePath]);
 
-  useConversationRedirect(urlConvId);
+  useConversationRedirect(effectiveConvId);
 
   // Subscribe to the bits of store state we render. Each is a
   // primitive selector so re-renders fire only when that specific
@@ -537,7 +561,6 @@ export function ChatPage() {
   const sessionStatus = useChatStore((s) => s.sessionStatus);
   const backgroundTaskCount = useChatStore((s) => s.backgroundTaskCount);
   const loadingConversation = useChatStore((s) => s.loadingConversation);
-  const activeConversationId = useChatStore((s) => s.conversationId);
   const conversationLoadError = useChatStore((s) => s.conversationLoadError);
   const boundAgentId = useChatStore((s) => s.boundAgentId);
   const boundAgentName = useChatStore((s) => s.boundAgentName);
@@ -574,15 +597,25 @@ export function ChatPage() {
     }
   }, [boundAgentId, agents, refetchAgents]);
 
-  const sendAgentId = initialPromptAgentId({ urlConvId, boundAgentId, agentId });
-  const dispatchFirstMessage = useCallback((prompt: PendingInitialPrompt, agent: string) => {
-    const { send, sendSlashCommand } = useChatStore.getState();
-    dispatchInitialPrompt(prompt, agent, send, sendSlashCommand);
-  }, []);
+  const sendAgentId = initialPromptAgentId({ urlConvId: effectiveConvId, boundAgentId, agentId });
+  const dispatchFirstMessage = useCallback(
+    (prompt: PendingInitialPrompt, agent: string) => {
+      if (!effectiveConvId) return;
+      const { send, sendSlashCommand } = useChatStore.getState();
+      dispatchInitialPrompt(
+        prompt,
+        agent,
+        (text, id, files) => send(text, id, files, { pinnedConversationId: effectiveConvId }),
+        (name, args, id) =>
+          sendSlashCommand(name, args, id, { pinnedConversationId: effectiveConvId }),
+      );
+    },
+    [effectiveConvId],
+  );
   useInitialPromptDispatch({
-    conversationId: urlConvId,
+    conversationId: effectiveConvId,
     agentId: sendAgentId,
-    loadingConversation,
+    loadingConversation: loadingConversation || activeConversationId !== effectiveConvId,
     dispatch: dispatchFirstMessage,
   });
 
@@ -614,13 +647,15 @@ export function ChatPage() {
   // effect uses. If the user switched away before the clone started, the
   // prompt stays pinned and waits; it never floats into another session.
   useEffect(() => {
-    if (pendingResumePrompt === null || !agentId || !urlConvId) return;
-    if (pendingResumePrompt.sessionId !== urlConvId) return;
+    if (pendingResumePrompt === null || !agentId || !effectiveConvId) return;
+    if (pendingResumePrompt.sessionId !== effectiveConvId) return;
     if (runnerOnline !== true) return;
     const { text, files, replyDraft } = pendingResumePrompt;
     setPendingResumePrompt(null);
-    void useChatStore.getState().send(text, agentId, files, { replyDraft });
-  }, [pendingResumePrompt, runnerOnline, agentId, urlConvId]);
+    void useChatStore
+      .getState()
+      .send(text, agentId, files, { replyDraft, pinnedConversationId: effectiveConvId });
+  }, [pendingResumePrompt, runnerOnline, agentId, effectiveConvId]);
 
   // A pending blocking card parks the turn, so suppress shimmer. Must sit before the
   // early returns (Rules of Hooks); a boolean selector avoids re-rendering on every
@@ -819,10 +854,10 @@ export function ChatPage() {
       ? (boundAgentBySession?.name ?? boundAgentName ?? subAgentLabel ?? null)
       : (activeSession?.title ?? null);
   useEffect(() => {
-    const fallback = urlConvId ? UNTITLED_CONVERSATION_LABEL : appName;
+    const fallback = effectiveConvId ? UNTITLED_CONVERSATION_LABEL : appName;
     const base = truncateTitle(activeConv?.title || sessionTabTitle || fallback);
     document.title = showsWorking ? `● ${base}` : base;
-  }, [activeConv?.title, sessionTabTitle, showsWorking, urlConvId, appName]);
+  }, [activeConv?.title, sessionTabTitle, showsWorking, effectiveConvId, appName]);
 
   const sessionModelOptions = useChatStore((s) => s.codexModelOptions);
   const fallbackPickerKind = modelPickerKindForConv({
@@ -893,18 +928,18 @@ export function ChatPage() {
     activeSession,
     sessionLoading,
     activeConv,
-    urlConvId,
+    effectiveConvId,
     conversationsData !== undefined,
   );
   const permissionPending = isPermissionLevelPending(
     activeSession,
     sessionLoading,
     activeConv,
-    urlConvId,
+    effectiveConvId,
     conversationsData !== undefined,
   );
   const reconnectHostId = activeSession?.hostId ?? activeConv?.host_id ?? null;
-  const reconnectHostOnline = useSessionHostOnline(urlConvId ?? undefined);
+  const reconnectHostOnline = useSessionHostOnline(effectiveConvId ?? undefined);
   const {
     reconnect,
     reconnectsArca,
@@ -914,7 +949,7 @@ export function ChatPage() {
     localReconnect,
     arcaReconnect,
   } = useSessionReconnect({
-    sessionId: urlConvId ?? null,
+    sessionId: effectiveConvId ?? null,
     hostId: reconnectHostId,
     hostName: hostRows?.find((row) => row.host_id === reconnectHostId)?.name,
     hostResumable: activeSession?.hostResumable ?? false,
@@ -934,25 +969,30 @@ export function ChatPage() {
     ) => {
       if (!agentId) return;
       // No server session yet (still creating) — nothing to POST to.
-      if (isTempConvId(urlConvId)) return;
+      if (isTempConvId(effectiveConvId)) return;
       // An unbound coding clone (fork-source label) needs a directory before
       // it can run: open the picker and stash this message to replay after
       // the bind. Pin the prompt to THIS session so it replays here, never
       // into a session the user may switch to first; carry any attachments
       // so the replay sends the same payload.
-      if (urlConvId && runnerOnline === false && routesToResumePicker) {
-        setPendingResumePrompt({ sessionId: urlConvId, text, files: files ?? [], replyDraft });
+      if (effectiveConvId && runnerOnline === false && routesToResumePicker) {
+        setPendingResumePrompt({
+          sessionId: effectiveConvId,
+          text,
+          files: files ?? [],
+          replyDraft,
+        });
         setResumeDirDialogOpen(true);
         return;
       }
       // Recover the unreachable host before dispatching another turn.
-      if (urlConvId && isUnreachable) {
+      if (effectiveConvId && isUnreachable) {
         void reconnect();
         // Posting now could record a failed turn, so the message waits for the host.
         if (sendReconnectsArca) {
           useChatStore
             .getState()
-            .enqueueMessage(text, files, replyDraft, urlConvId, { waitingForHost: true });
+            .enqueueMessage(text, files, replyDraft, effectiveConvId, { waitingForHost: true });
         }
         return;
       }
@@ -978,10 +1018,11 @@ export function ChatPage() {
           holdsInitialDraft(chat),
         )
       ) {
-        chat.enqueueMessage(text, files, replyDraft);
+        chat.enqueueMessage(text, files, replyDraft, effectiveConvId);
         return;
       }
       void useChatStore.getState().send(text, agentId, files, {
+        pinnedConversationId: effectiveConvId,
         replyDraft,
         onConversationCreated: (newId) => {
           // Eager URL update: the moment the server tells us this
@@ -994,7 +1035,7 @@ export function ChatPage() {
     },
     [
       agentId,
-      urlConvId,
+      effectiveConvId,
       runnerOnline,
       routesToResumePicker,
       isUnreachable,
@@ -1009,21 +1050,30 @@ export function ChatPage() {
       if (!agentId) return;
       // Slash commands aren't replayed (an edge), but still route an unbound
       // coding clone to the directory picker so it isn't a dead end.
-      if (urlConvId && runnerOnline === false && routesToResumePicker) {
+      if (effectiveConvId && runnerOnline === false && routesToResumePicker) {
         setResumeDirDialogOpen(true);
         return;
       }
-      if (urlConvId && isUnreachable) {
+      if (effectiveConvId && isUnreachable) {
         void reconnect();
         return;
       }
       void useChatStore.getState().sendSlashCommand(name, args, agentId, {
+        pinnedConversationId: effectiveConvId,
         onConversationCreated: (newId) => {
           navigate(`/c/${newId}`, { replace: true });
         },
       });
     },
-    [agentId, urlConvId, runnerOnline, routesToResumePicker, isUnreachable, reconnect, navigate],
+    [
+      agentId,
+      effectiveConvId,
+      runnerOnline,
+      routesToResumePicker,
+      isUnreachable,
+      reconnect,
+      navigate,
+    ],
   );
 
   const onStop = useCallback(() => {
@@ -1033,7 +1083,7 @@ export function ChatPage() {
   // A client-only conversation has no server session to POST to yet. Keep the
   // composer editable so the user can draft the next message during creation,
   // but gate submission until the temp id is promoted below.
-  const sendDisabledReason = isTempConvId(urlConvId) ? "Starting the session…" : null;
+  const sendDisabledReason = isTempConvId(effectiveConvId) ? "Starting the session…" : null;
   const readOnlyReason = readOnlyReasonForSessionLabels(activeSession, activeConv);
   // Opening an asleep sandbox's session presses Reconnect host for the user. The
   // snapshot's launch stage counts too: the chat store may not have loaded it yet.
@@ -1058,8 +1108,8 @@ export function ChatPage() {
     // Keep the seeded native identity through the temp-to-real ID handoff,
     // until the session snapshot can supply its wrapper label and harness.
     if (
-      isTempConvId(urlConvId) ||
-      (composerSessionModelSeeded && activeConversationId === urlConvId)
+      isTempConvId(effectiveConvId) ||
+      (composerSessionModelSeeded && activeConversationId === effectiveConvId)
     ) {
       const nativeAgent = nativeCodingAgentForHarness(composerSessionHarness);
       const seededLabels: Record<string, string | null> = nativeAgent
@@ -1075,7 +1125,7 @@ export function ChatPage() {
   }, [
     activeSession,
     activeConv,
-    urlConvId,
+    effectiveConvId,
     composerSessionHarness,
     composerSessionModelSeeded,
     activeConversationId,
@@ -1146,21 +1196,27 @@ export function ChatPage() {
 
   // Loading + error gates for `/c/:id` hydration. Placed after all hooks so the
   // early return can't change the hook order between renders.
-  if (urlConvId) {
+  if (effectiveConvId) {
     const promotingTempConversation =
-      isTempConvId(urlConvId) &&
+      isTempConvId(effectiveConvId) &&
       activeConversationId !== null &&
       !isTempConvId(activeConversationId);
-    if (loadingConversation || (activeConversationId !== urlConvId && !promotingTempConversation))
+    if (
+      loadingConversation ||
+      (activeConversationId !== effectiveConvId && !promotingTempConversation)
+    )
       return <HydratingPlaceholder />;
     if (conversationLoadError) {
-      return <ConversationLoadError conversationId={urlConvId} error={conversationLoadError} />;
+      return (
+        <ConversationLoadError conversationId={effectiveConvId} error={conversationLoadError} />
+      );
     }
   }
 
   const mainAgent = (
     <MainAgentSurface
-      conversationId={urlConvId ?? null}
+      sessionUiKey={sessionUi.key}
+      conversationId={effectiveConvId ?? null}
       status={status}
       isWorking={isWorking}
       showsWorking={showsWorking}
@@ -1213,7 +1269,7 @@ export function ChatPage() {
   // first message and silently create a session — but sessions are
   // bound 1:1 to a local runner that only the CLI can launch. Show
   // the CLI instructions instead so users learn the right entry point.
-  if (!urlConvId) return <NewChatLandingScreen />;
+  if (!effectiveConvId) return <NewChatLandingScreen />;
 
   // Pick the reconnect dialog's state from the session's host binding, not
   // from liveness: the dialog opens both from an unreachable send AND from the
@@ -1234,7 +1290,7 @@ export function ChatPage() {
         onOpenChange={setDialogOpen}
         localReconnect={localReconnect}
         arcaReconnect={arcaReconnect}
-        conversationId={urlConvId}
+        conversationId={effectiveConvId}
         serverUrl={getCliServerUrl()}
         wrapper={activeConv?.labels?.["omnigent.wrapper"]}
         harness={activeSession?.harness}
@@ -1252,7 +1308,7 @@ export function ChatPage() {
         <ResumeWithDirectoryDialog
           open={resumeDirDialogOpen}
           onOpenChange={setResumeDirDialogOpen}
-          sessionId={urlConvId}
+          sessionId={effectiveConvId}
           // Fork clone prefills from its source; a host-less session has none
           // and prefills from its own recorded host/workspace/branch instead.
           sourceSessionId={isUnboundFork ? forkSourceId : null}
@@ -1297,6 +1353,7 @@ function SessionLayout({ mainAgent }: SessionLayoutProps) {
 }
 
 interface MainAgentSurfaceProps {
+  sessionUiKey: number;
   onNewSession: () => void;
   /**
    * Active conversation id, or null when on the landing page. Forwarded
@@ -1503,6 +1560,7 @@ export function updateWarmTerminalSurfaces(
  * see ViewModeToggle) so the user can flip back to Chat.
  */
 const MainAgentSurface = memo(function MainAgentSurfaceImpl({
+  sessionUiKey,
   conversationId,
   status,
   isWorking,
@@ -1746,6 +1804,8 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
   // Hidden overlays retain layout so FitAddon geometry stays stable; the chat
   // surface unmounts while Terminal is shown.
   const mountTerminal = shouldMountTerminalSurface(conversationId, terminalFirst);
+  // As MainTerminalSurface reads it: floating panes leave a hidden split's tab drop preview here.
+  const floatingPanesShown = useFloatingPanesShown();
   // Non-owners attach read-only: a shared PTY can't attribute input
   // per-user, so only the owner may type. They drive the agent via the
   // composer instead. Server enforces this too.
@@ -1820,6 +1880,10 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
   return (
     <>
       {terminalSurfaces}
+      {/* A tab dragged over a chat shown alone: its panes wait hidden, so it previews here. */}
+      {floatingPanesShown && !showTerminal && !chatInPanes && conversationId && mountTerminal && (
+        <LoneChatPaneDropPreview conversationId={conversationId} />
+      )}
       {!showTerminal && (
         <ChatPaneBody sessionId={conversationId ?? ""} host={chatPaneHost} marked={chatMarked}>
           {/* The scrolling transcript column owns every streaming-hot store
@@ -1846,6 +1910,7 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
           structurally non-interactive session), as SideChatPane does. */}
           {!composerReadOnly && (
             <SelectionPopup
+              key={`selection:${sessionUiKey}`}
               containerRef={conversationRef}
               onReply={(text) => composerRef.current?.appendReplyQuote(text)}
               onAskInSideChat={
@@ -1857,6 +1922,7 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
           )}
 
           <Composer
+            key={sessionUiKey}
             ref={composerRef}
             disabled={disabled}
             status={status}
@@ -2143,6 +2209,7 @@ export function buildSlashCommandMap(
   showPermissions = false,
   showRewind = false,
   showGoal = false,
+  showLoop = false,
 ): Record<string, string> {
   const m: Record<string, string> = {};
   for (const [name, description] of Object.entries(BUILTIN_SLASH_COMMANDS)) {
@@ -2154,6 +2221,7 @@ export function buildSlashCommandMap(
     if (name === "/permissions" && !showPermissions) continue;
     if (name === "/rewind" && !showRewind) continue;
     if (name === "/goal" && !showGoal) continue;
+    if (name === "/loop" && !showLoop) continue;
     // /btw is a Claude Code CLI built-in — only offer it on claude-native.
     if (name === "/btw" && !showBtw) continue;
     // /side is a Codex CLI built-in (ephemeral fork) — only offer it on codex-native.
@@ -2200,6 +2268,27 @@ export function composerOffersRewind(
   return (harness === "claude-native" || harness === "claude-sdk") && info.session_rewind === true;
 }
 
+/** Harnesses whose sessions the composer offers ``/loop`` on. */
+const LOOP_HARNESSES: ReadonlySet<string> = new Set([
+  "claude-native",
+  "claude-sdk",
+  "codex-native",
+  "codex",
+]);
+
+/** Offer `/loop` on supported top-level sessions when the server manages loops; arming also needs saved timers. */
+export function composerOffersLoop(
+  harness: string | null,
+  info: ServerInfo | "loading",
+  session:
+    { parentSessionId?: string | null; labels?: Record<string, string> | null } | null | undefined,
+): boolean {
+  if (info === "loading") return false;
+  if (info.session_loops !== true) return false;
+  if (harness === null || !LOOP_HARNESSES.has(harness)) return false;
+  return sessionTakesSavedTimers(session);
+}
+
 /**
  * Set of slash commands that should fill the textarea with
  * ``"/cmd "`` on menu selection rather than executing immediately.
@@ -2222,10 +2311,13 @@ export function buildSlashCommandWithArgsSet(
   showBtw = false,
   showSide = false,
   skillPrefix: "/" | "$" = "/",
+  showLoop = false,
 ): Set<string> {
   const s = new Set<string>();
   if (showEffort) s.add("/effort");
   if (showModel) s.add("/model");
+  // Selecting /loop fills "/loop " so the user types the interval and prompt after it.
+  if (showLoop) s.add("/loop");
   // Selecting /btw fills "/btw " so the user types the side question after it.
   if (showBtw) s.add("/btw");
   // Selecting /side fills "/side " so the user types the side question after it.
@@ -2979,6 +3071,22 @@ function ComposerImpl(
   );
   const showClear = composerOffersClear(sessionHarness, composerServerInfo);
   const showRewind = composerOffersRewind(sessionHarness, composerServerInfo);
+  const showLoop =
+    composerSessionId !== null &&
+    composerOffersLoop(sessionHarness, composerServerInfo, composerSession);
+  // The /loop handler settles after the user may have switched sessions or typed again.
+  const composerSessionIdRef = useRef(composerSessionId);
+  // A /loop failure may land after the chat surface unmounted (the terminal view).
+  const composerMountedRef = useRef(true);
+  useEffect(() => {
+    composerMountedRef.current = true;
+    return () => {
+      composerMountedRef.current = false;
+    };
+  }, []);
+  composerSessionIdRef.current = composerSessionId;
+  const draftRef = useRef(value);
+  draftRef.current = value;
   const [rewindPickerOpen, setRewindPickerOpen] = useState(false);
   // /btw is a Claude Code CLI built-in (side chat), so offer it only on
   // claude-native sessions. Selected/typed, it sends as plaintext to the
@@ -3063,6 +3171,7 @@ function ComposerImpl(
         showCodexApprovalMode,
         showRewind,
         showGoal,
+        showLoop,
       ),
     [
       showEffort,
@@ -3077,6 +3186,7 @@ function ComposerImpl(
       showCodexApprovalMode,
       showRewind,
       showGoal,
+      showLoop,
     ],
   );
   const goalBuiltinNames = useMemo(() => new Set(showGoal ? ["/goal"] : []), [showGoal]);
@@ -3120,8 +3230,9 @@ function ComposerImpl(
         showBtw,
         showSide,
         skillPrefix,
+        showLoop,
       ),
-    [commandSkills, showEffort, showModel, showBtw, showSide, skillPrefix],
+    [commandSkills, showEffort, showModel, showBtw, showSide, skillPrefix, showLoop],
   );
 
   const nativeShell = permissionPending
@@ -3543,6 +3654,97 @@ function ComposerImpl(
           .catch((err: unknown) => {
             setCommandError(err instanceof Error ? err.message : "Failed to set model");
           });
+        return true;
+      }
+      case "/loop": {
+        if (!showLoop || composerSessionId === null) return false;
+        const command = parseLoopCommand(arg);
+        if (command.kind === "error") {
+          setCommandError(command.message);
+          return true;
+        }
+        // Loops already running still stop after saving timers is turned off.
+        if (
+          command.kind === "start" &&
+          (composerServerInfo === "loading" || composerServerInfo.session_timers !== true)
+        ) {
+          setCommandError(
+            "Saving timers is off on this server, so a loop can't be armed. " +
+              "/loop stop still stops a running one.",
+          );
+          return true;
+        }
+        dirtyRef.current = true;
+        setValue("");
+        setCommandError(null);
+        const loopSessionId = composerSessionId;
+        const typed = `${cmd} ${arg}`;
+        // Hints land only in the session the command was typed in.
+        const report = (hint: string) => {
+          if (composerSessionIdRef.current === loopSessionId) setCommandError(hint);
+        };
+        void runSessionTimerMutation(loopSessionId, async () => {
+          if (command.kind === "stop") {
+            const stopped = await stopSessionLoop(loopSessionId);
+            report(stopped === null ? "No loop is running in this session." : "Loop stopped.");
+            return;
+          }
+          // The server replaces the caller's running loop in this session, so one
+          // runs per user per session however many tabs arm one.
+          const timer = await setSessionTimer(loopSessionId, {
+            seconds: command.seconds,
+            repeat: true,
+            note: command.prompt,
+            origin: LOOP_TIMER_ORIGIN,
+          });
+          appendEntry(typed);
+          try {
+            // Like Claude Code's /loop, run the prompt now rather than waiting for the
+            // first tick: the same tagged message every tick sends.
+            await sendLoopPrompt(loopSessionId, command.prompt);
+          } catch (err: unknown) {
+            // Every tick would meet the same refusal, so arm nothing. The server has
+            // already stopped the loop this one replaced, so say so.
+            const reason = (err instanceof Error ? err.message : "The first run failed").replace(
+              /\.$/,
+              "",
+            );
+            const replacedNote =
+              timer.replacedTimerId !== null ? " The loop it replaced is already stopped." : "";
+            let outcome = "The loop was not armed.";
+            try {
+              await cancelSessionTimer(loopSessionId, timer.timerId);
+            } catch {
+              outcome = "The loop could not be cancelled and may still be running; try /loop stop.";
+            }
+            throw new Error(`${reason}. ${outcome}${replacedNote}`, { cause: err });
+          }
+          const every = formatLoopInterval(timer.intervalSeconds ?? command.seconds);
+          const nextRun = new Date(timer.fireAt);
+          const nextRunLabel = Number.isNaN(nextRun.getTime())
+            ? ""
+            : `, next run at ${nextRun.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+          const replaced = timer.replacedTimerId !== null ? ", replacing the previous loop" : "";
+          const asText = looksLikeCommand(command.prompt)
+            ? " The prompt looks like a command; the loop sends it as a message, so it may not run as one."
+            : "";
+          report(
+            `Loop armed: every ${every}${nextRunLabel}${replaced}. Running the prompt now; ` +
+              `it repeats until /loop stop and survives runner restarts.${asText}`,
+          );
+        }).catch((err: unknown) => {
+          // Give the command back to fix: into the composer while it still shows this
+          // session, else into the session's saved draft, unless something newer is there.
+          if (composerMountedRef.current && composerSessionIdRef.current === loopSessionId) {
+            if (draftRef.current === "") setValue(typed);
+          } else {
+            const saved = getSessionDraft(loopSessionId);
+            if (!saved?.text && !saved?.files.length) {
+              setSessionDraft(loopSessionId, { text: typed, files: [] });
+            }
+          }
+          report(err instanceof Error ? err.message : "Loop failed");
+        });
         return true;
       }
       case "/context": {
@@ -4099,7 +4301,7 @@ function ComposerImpl(
         runCommand(() =>
           executeSlashCommand(
             cmd,
-            cmd === "/compact" ? trimmed.slice(parts[0].length).trim() : arg,
+            cmd === "/compact" || cmd === "/loop" ? trimmed.slice(parts[0].length).trim() : arg,
           ),
         );
         return;

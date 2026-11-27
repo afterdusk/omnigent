@@ -842,6 +842,30 @@ class SessionResourcePaginatedList(BaseModel):
     has_more: bool = False
 
 
+class TerminalShellState(BaseModel):
+    """Whether a session terminal runs anything besides its login shell.
+
+    Only what a close confirmation needs: never a pid, an argument or another process.
+    """
+
+    state: Literal["idle", "busy", "unknown"] = Field(
+        description="`idle`: only the login shell runs, with no other process; a loop of "
+        "shell builtins still reads idle. `busy`: something else does. `unknown`: it "
+        "couldn't be told in time, or the terminal doesn't run a shell; treat it as busy."
+    )
+    foreground: str | None = Field(
+        default=None,
+        description="When busy, the foreground job's command name, e.g. `vim`; cleaned and "
+        "at most 32 characters. Null when it can't be told.",
+    )
+    background_jobs: int | None = Field(
+        default=None,
+        ge=0,
+        description="When busy, how many other jobs run. Null when jobs can't be told apart, "
+        "as in a sandboxed pane.",
+    )
+
+
 # ── Conversations ───────────────────────────────────────────────
 
 
@@ -4052,6 +4076,8 @@ class SessionMessageItem(_SessionItemCommon):
         transcripts; omitted when ``False``.
     :param user_authored: ``True`` for confirmed or conservatively
         preserved user input; omitted when ``False``.
+    :param origin: What sent a user message no human typed, e.g. ``"loop"``
+        for a run of the web composer's ``/loop``; omitted when unset.
     :param subagent_return_id: Native task id of an explicitly completed
         child; omitted when unset.
     :param interrupted: ``True`` for a partial assistant response from an
@@ -4070,6 +4096,7 @@ class SessionMessageItem(_SessionItemCommon):
     model: str | None = None
     is_meta: bool = False
     user_authored: bool = False
+    origin: str | None = None
     subagent_return_id: str | None = None
     interrupted: bool = False
     stream_message_id: str | None = None

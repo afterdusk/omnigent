@@ -1,9 +1,8 @@
 # Persistent task scheduling
 
-Recurring schedules have a minimum interval
-of **10 minutes** on connected hosts in either session mode, and in sandboxes
-when continuing the existing session. Starting a new sandbox session each run
-requires **one hour**. Use `FREQ=MINUTELY;INTERVAL=10` for a ten-minute schedule.
+Recurring schedules have a minimum interval of **10 minutes** on every execution
+target and session mode, including a sandbox that starts a new session each run.
+Use `FREQ=MINUTELY;INTERVAL=10` for a ten-minute schedule.
 
 Scheduled tasks ("automations") run a saved prompt on a recurring schedule or on
 demand. `PersistentTaskScheduler` keeps the schedule in the database, so every
@@ -464,9 +463,15 @@ instead of saving.
   (`next_timer_time`), skipping missed ones, and timers are exempt from the automation
   minimum interval. A firing comes up to one poll (15 seconds by default) late.
 - **Delivery.** The executor skips budgets, sharing and run labels, and sends the
-  hidden (`is_meta`) wake through the continued-session dispatch, in the session's
+  hidden (`is_meta`) wake, or a `/loop` timer's prompt as a visible message tagged
+  `origin: "loop"`, through the continued-session dispatch, in the session's
   current permission mode. A session that was deleted, archived or closed, or that
-  the owner can no longer send to, stops the timer (`timer_session_unavailable`).
+  the owner can no longer send to, stops the timer (`timer_session_unavailable`). A
+  `/loop` timer fires only while the session's per-user loop label still names it;
+  one the label no longer names, left behind when replacing or stopping it failed
+  partway, retires itself instead (`loop_superseded`). So does every loop in a
+  session that `/clear` or `/rewind` superseded, which is marked for it before its
+  viewers are redirected; a mark that can't be saved fails the supersession.
   The wake meets the session's REQUEST-phase input policies first: a deny, or an ASK
   no one can answer, skips that firing (`timer_policy_denied`). A runner that can't
   be reached or declines the wake fails the firing (`launch_failed`), which is not
@@ -627,8 +632,9 @@ automations.
 
 ## Sub-hour schedule rollout
 
-API validation and both schedulers always support the target/mode minimums above.
-`/v1/info` reports the fixed `scheduled_task_subhour` capability so newer clients
+API validation and both schedulers always support the ten-minute minimum above.
+`/v1/info` reports the fixed `scheduled_task_subhour` capability, and
+`scheduled_task_subhour_new_sandbox` for new sandbox sessions, so newer clients
 retain the hourly floor on older servers. The custom UI also needs `automations_v2`.
 
 Upgrade scheduler replicas before API replicas begin accepting sub-hour schedules,
@@ -636,14 +642,15 @@ and avoid routing writes across mixed API versions during the rollout. Older API
 replicas reject short schedules; older schedulers can pause them as invalid.
 Keep the existing scheduler mode unchanged during the version upgrade.
 
-Updates validate the proposed recurrence, session mode and target outside the
-database transaction, then compare their saved values under the task row lock.
+Updates validate a proposed recurrence outside the database transaction, then
+compare the saved recurrence, session mode and target under the task row lock.
 A concurrent change returns HTTP 409 without applying any fields; reload and
 revalidate before retrying. Metadata-only writes do not revalidate saved cadences.
 
 Before rolling binaries back to a version with the hourly-only parser, stop
 accepting sub-hour schedules, pause them and change their recurrence to hourly
-or slower (or delete them). An old scheduler can durably pause unsupported rules
+or slower (or delete them). Rolling back to a version that still needs an hour
+for new sandbox sessions needs the same for those automations only. An old scheduler can durably pause unsupported rules
 and clear `next_run_at`, even before its host-ownership filter. Restoring the new
 binary does not automatically resume tasks paused by an old scheduler.
 

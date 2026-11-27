@@ -103,6 +103,9 @@ from omnigent.server.background_session_titles import (
     BackgroundSessionTitleCoordinator,
     RunnerBackgroundTitleGenerator,
 )
+from omnigent.server.background_session_titles import (
+    install_coordinator as install_background_title_coordinator,
+)
 from omnigent.server.disconnect_evidence import DisconnectEvidence, drop_attributes
 from omnigent.server.feature_flags import (
     DeploymentGate,
@@ -351,6 +354,9 @@ class ServerInfoResponse(BaseModel):
     scheduled_task_workflow_id: bool = True
     # Connected hosts and continued sandbox sessions accept ten-minute schedules.
     scheduled_task_subhour: bool = True
+    # A sandbox that starts a new session each run also accepts ten-minute schedules;
+    # older servers require an hour.
+    scheduled_task_subhour_new_sandbox: bool = True
     # Scheduled tasks accept an explicit ``COUNT=1`` rule that fires once, such as
     # a reminder, and ``first_run_at``. Needs the database scheduler and the
     # ``one_time_automations`` release feature; absent on older servers.
@@ -361,6 +367,9 @@ class ServerInfoResponse(BaseModel):
     # ``POST /v1/sessions/{id}/timers`` saves sys_timer_set timers as scheduled tasks,
     # which needs the database scheduler; absent on older servers.
     session_timers: bool = False
+    # A ``/loop`` timer replaces the caller's running loop in its session and
+    # ``DELETE /v1/sessions/{id}/timers?origin=loop`` stops it; absent on older servers.
+    session_loops: bool = False
     automation_trigger_poll_minutes: int = 10
     # Longest session message this server delivers; older servers omit it and
     # deliver at most 8,000 characters.
@@ -2159,6 +2168,7 @@ def create_app(
         load_branding_snapshot,
         load_picker_curation,
         load_server_config,
+        read_only_code_hosts,
         session_title_instructions,
     )
 
@@ -2167,6 +2177,7 @@ def create_app(
     picker_curation = load_picker_curation(resolved_server_config)
     title_instructions = session_title_instructions(resolved_server_config)
     trigger_poll_minutes = automation_trigger_poll_minutes(resolved_server_config)
+    read_only_hosts = read_only_code_hosts(resolved_server_config)
     resolved_feature_flags = feature_flags or resolve_feature_flags()
     if harness_install is None:
         app_harness_install: bool | Callable[[], bool] = resolved_feature_flags.enabled(
@@ -2601,10 +2612,12 @@ def create_app(
                 await managed_sandbox_reaper.start()
 
         session_pull_requests.install_refresher(pull_request_refresher)
+        install_background_title_coordinator(background_title_coordinator)
         try:
             with monitor_event_loop():
                 yield
         finally:
+            install_background_title_coordinator(None)
             session_pull_requests.install_refresher(None)
             await pull_request_refresher.aclose()
             if scheduler_start_retry is not None:
@@ -4235,6 +4248,7 @@ def create_app(
                 "scheduled_task_clone": automations_enabled
                 and bool(app.state.scheduled_task_dispatch_enabled),
                 "session_timers": bool(app.state.session_timers_enabled),
+                "session_loops": scheduled_task_store is not None,
                 "session_move_source_checks": True,
                 "session_organize_source_checks": True,
                 "session_archive_runner_checks": True,
@@ -4336,6 +4350,7 @@ def create_app(
         create_sessions_router(
             conversation_store,
             agent_store,
+            read_only_code_hosts=read_only_hosts,
             file_store=file_store,
             artifact_store=artifact_store,
             runner_router=runner_router,

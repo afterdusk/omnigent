@@ -1,4 +1,4 @@
-import type { AssistantMessagePhase } from "./conversationItems";
+import type { AssistantMessagePhase, TerminalCommandSubmission } from "./conversationItems";
 import type { NativePermissionDelivery } from "./nativePermissionDelivery";
 // Mirrors sdks/python-client/omnigent_client/_blocks.py.
 //
@@ -254,6 +254,8 @@ export interface UserMessageBlock {
    * Absent on blocks hydrated from history (`items`), which mount fresh.
    */
   stableKey?: string;
+  /** What sent the message when no human typed it, e.g. `"loop"` for a /loop run. */
+  origin?: string;
 }
 
 // ── Tool calls ───────────────────────────────────────────
@@ -364,6 +366,7 @@ export interface RoutingDecisionBlock {
 
 export interface TerminalCommandBlock {
   type: "terminal_command";
+  submission?: TerminalCommandSubmission;
   ctx: BlockContext;
   /** `"input"` for the command line; `"output"` for stdout/stderr. */
   kind: "input" | "output";

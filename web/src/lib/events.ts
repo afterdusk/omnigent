@@ -1,4 +1,4 @@
-import type { AssistantMessagePhase } from "./conversationItems";
+import type { AssistantMessagePhase, TerminalCommandSubmission } from "./conversationItems";
 import type { NativePermissionDelivery } from "./nativePermissionDelivery";
 import type { JournalEntry } from "./sessionJournal";
 // Mirrors sdks/python-client/omnigent_client/_events.py.
@@ -387,6 +387,12 @@ export interface SlashCommand {
   /** Human author email when the server attributed one; carried onto
    * the synthesized user-echo bubble for shared-session labels. */
   createdBy?: string;
+  /**
+   * The pending entry this command settles: its id, or `null` when no client
+   * queued it (typed in the terminal). Absent when the receipt names no owner
+   * (a skill invoked from the composer, an older server).
+   */
+  clearedPendingId?: string | null;
   itemId: string;
   responseId: string;
 }
@@ -422,6 +428,7 @@ export interface RoutingDecision {
  */
 export interface TerminalCommandEvent {
   type: "terminal_command";
+  submission?: TerminalCommandSubmission;
   /** `"input"` for the command line; `"output"` for stdout/stderr. */
   kind: "input" | "output";
   input: string | null;

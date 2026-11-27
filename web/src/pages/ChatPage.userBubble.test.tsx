@@ -64,11 +64,14 @@ function assistantBubble(
 }
 
 function renderBubble(bubble: Bubble) {
-  // File mention pills check the workspace through a query.
+  // File mention pills check the workspace through a query; a /loop run's label
+  // explains itself in a tooltip.
   return render(
     <QueryClientProvider client={new QueryClient()}>
       <FileViewerContext.Provider value={FILE_VIEWER_NOOP}>
-        <BubbleView bubble={bubble} />
+        <TooltipProvider>
+          <BubbleView bubble={bubble} />
+        </TooltipProvider>
       </FileViewerContext.Provider>
     </QueryClientProvider>,
   );
@@ -178,6 +181,7 @@ function renderWithSessionRepo(children: ReactNode) {
     available: true,
     repo: { name_with_owner: "acme/app", host: "github.com" },
     workspace_repo: { name_with_owner: "acme/app", host: "github.com" },
+    prs: [{ url: "https://github.com/acme/app/pull/4242", host: "github.com", number: 4242 }],
   });
   render(
     <QueryClientProvider client={queryClient}>
@@ -187,7 +191,7 @@ function renderWithSessionRepo(children: ReactNode) {
 }
 
 describe("UserBubble pull request references", () => {
-  it("links a PR reference to the session repo", () => {
+  it("links a PR reference to the PR the session links", () => {
     renderWithSessionRepo(<BubbleView bubble={userBubble("See #4242 and acme/lib#7")} />);
     expect(screen.getByRole("link", { name: /#4242/ })).toHaveAttribute(
       "href",
@@ -201,12 +205,25 @@ describe("UserBubble pull request references", () => {
 });
 
 describe("/btw answer pull request references", () => {
-  it("links a PR reference to the session repo", () => {
+  it("links a PR reference to the PR the session links", () => {
     renderWithSessionRepo(<BtwSidechatAnswer answer="Fixed in #4242." />);
     expect(screen.getByRole("link", { name: /#4242/ })).toHaveAttribute(
       "href",
       "https://github.com/acme/app/pull/4242",
     );
+  });
+});
+
+describe("UserBubble loop runs", () => {
+  it("labels a message a /loop sent, beside the bubble", () => {
+    renderBubble(userBubble("check CI", { origin: "loop" }));
+    expect(screen.getByTestId("message-origin")).toHaveTextContent("Loop");
+    expect(screen.getByText("check CI")).toBeInTheDocument();
+  });
+
+  it("leaves a typed message unlabelled", () => {
+    renderBubble(userBubble("check CI"));
+    expect(screen.queryByTestId("message-origin")).toBeNull();
   });
 });
 
@@ -953,6 +970,7 @@ describe("UserBubble command tint", () => {
       available: true,
       repo: { name_with_owner: "acme/app", host: "github.com" },
       workspace_repo: { name_with_owner: "acme/app", host: "github.com" },
+      prs: [{ url: "https://github.com/acme/app/pull/4242", host: "github.com", number: 4242 }],
     });
     renderScoped(userBubble("/team review #4242"), <PublishCommands />);
     expect(screen.getByText("/team")).toHaveClass("text-brand-accent");

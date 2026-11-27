@@ -9,7 +9,7 @@ import { parseNativePermissionDelivery } from "./nativePermissionDelivery";
 // reducer never seeing certain events, which the reducer's tests can't
 // catch — please add an SSE-parser test when you touch this.
 
-import { assistantMessagePhase } from "./conversationItems";
+import { assistantMessagePhase, terminalCommandSubmission } from "./conversationItems";
 import type { JournalEntry } from "./sessionJournal";
 import { readSubagentActivity } from "./subagentActivity";
 import { readTaskActivity } from "./taskActivity";
@@ -1357,6 +1357,13 @@ function parseOutputItem(data: Record<string, unknown>): StreamEvent | null {
       agentName: String(rec.model ?? ""),
       // Present only on human-authored receipts (server exclude_none).
       ...(typeof rec.created_by === "string" ? { createdBy: rec.created_by } : {}),
+      // A native command's receipt always says which pending entry it settles.
+      ...("cleared_pending_id" in data
+        ? {
+            clearedPendingId:
+              typeof data.cleared_pending_id === "string" ? data.cleared_pending_id : null,
+          }
+        : {}),
       itemId,
       responseId,
     } satisfies SlashCommand;
@@ -1383,6 +1390,7 @@ function parseOutputItem(data: Record<string, unknown>): StreamEvent | null {
   if (itemType === "terminal_command") {
     return {
       type: "terminal_command",
+      submission: terminalCommandSubmission(rec.submission),
       kind: rec.kind === "output" ? "output" : "input",
       input: typeof rec.input === "string" ? rec.input : null,
       stdout: typeof rec.stdout === "string" ? rec.stdout : null,

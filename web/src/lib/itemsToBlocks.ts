@@ -59,6 +59,7 @@ import {
   isRoutingDecisionItem,
   isSlashCommandItem,
   isTerminalCommandItem,
+  terminalCommandSubmission,
 } from "./conversationItems";
 import { nativePolicyNameForAgentName } from "./nativeCodingAgents";
 import { routingExtrasFromWire } from "./routingDecision";
@@ -382,6 +383,7 @@ function userMessageToBlock(item: MessageItem): UserMessageBlock {
         { type: "input_text" | "input_image" | "input_file" }
       > => c.type === "input_text" || c.type === "input_image" || c.type === "input_file",
     ),
+    ...(typeof item.origin === "string" ? { origin: item.origin } : {}),
   };
 }
 
@@ -541,6 +543,7 @@ function routingDecisionToBlock(item: RoutingDecisionItem): RoutingDecisionBlock
 function terminalCommandToBlock(item: TerminalCommandItem): TerminalCommandBlock {
   return {
     type: "terminal_command",
+    submission: terminalCommandSubmission(item.submission),
     ctx: ctxFor(item),
     kind: item.kind,
     input: item.input ?? null,

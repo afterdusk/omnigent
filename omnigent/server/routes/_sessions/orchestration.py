@@ -51,6 +51,7 @@ from omnigent.entities import (
 from omnigent.entities.conversation import (
     FunctionCallData,
     FunctionCallOutputData,
+    TerminalCommandSubmission,
     parse_item_data,
 )
 from omnigent.entities.permission import SessionPermission
@@ -1333,7 +1334,10 @@ def _labels_for_viewer(labels: dict[str, str], user_id: str | None) -> dict[str,
     :returns: A copy with the pin and sandbox-repo families collapsed to their
         canonical bare keys.
     """
-    from omnigent.stores.conversation_store import FAMILY_PIN_LABEL_PREFIX
+    from omnigent.stores.conversation_store import (
+        FAMILY_PIN_LABEL_PREFIX,
+        LOOP_TIMER_LABEL_PREFIX,
+    )
 
     my_key = pinned_label_key(user_id)
     my_pin = labels.get(my_key)
@@ -1343,6 +1347,8 @@ def _labels_for_viewer(labels: dict[str, str], user_id: str | None) -> dict[str,
         k: v
         for k, v in labels.items()
         if not k.startswith(FAMILY_PIN_LABEL_PREFIX)
+        # Server-owned and per user: a client copying its labels must never carry one.
+        and not k.startswith(LOOP_TIMER_LABEL_PREFIX)
         and not k.startswith(PROFILE_LABEL_PREFIX)
         and k != PINNED_LABEL_KEY
         and not k.startswith(f"{PINNED_LABEL_KEY}.")
@@ -1990,6 +1996,30 @@ def _resolve_session_provider_entry(
         return None
 
 
+def _resolve_session_pricing_context(conv: Any) -> tuple[str | None, Any | None]:
+    """Prefer a session's saved inference binding, with legacy pricing as fallback."""
+    snapshot = getattr(conv, "inference_snapshot", None)
+    if snapshot is not None:
+        try:
+            from omnigent.inference_config import resolve_bound_provider
+
+            harness = snapshot["harness"]
+            provider = resolve_bound_provider(
+                snapshot["runtime_config"], harness, allow_empty=True
+            )
+            if provider is not None:
+                return harness, provider
+        except Exception:  # noqa: BLE001 — a saved configuration must not break accounting
+            warn_key = f"snapshot-lookup-error:{getattr(conv, 'agent_id', None)}"
+            if warn_key not in _WARNED_PRICING_LOOKUPS:
+                _WARNED_PRICING_LOOKUPS.add(warn_key)
+                _logger.warning(
+                    "saved inference provider lookup failed for session %s; using legacy pricing",
+                    getattr(conv, "id", None),
+                )
+    return _resolve_harness(conv) if conv else None, _resolve_session_provider_entry(conv)
+
+
 def _sane_relay_token_count(value: object) -> int:
     """
     Coerce a runner-reported token count to a trusted non-negative int.
@@ -2120,14 +2150,8 @@ def _accumulate_session_usage(
             )
             from omnigent.onboarding.provider_config import load_config
 
-            # Load provider config to check for custom pricing
-            provider_config = load_config()
-            # Resolve harness from conversation (agent spec + overrides)
-            harness = _resolve_harness(conv) if conv else None
-            # Resolve the actual provider the session was launched with so
-            # sessions on a non-default named provider are priced at their
-            # configured rate rather than the harness default's rate.
-            provider_entry = _resolve_session_provider_entry(conv)
+            harness, provider_entry = _resolve_session_pricing_context(conv)
+            provider_config = load_config() if provider_entry is None else None
             pricing = fetch_model_pricing_with_provider(
                 llm_model,
                 provider_config=provider_config,
@@ -2441,13 +2465,8 @@ def _persist_native_cumulative_usage(
             )
             from omnigent.onboarding.provider_config import load_config
 
-            # Load provider config to check for custom pricing
-            provider_config = load_config()
-            # Resolve harness from conversation (agent spec + overrides)
-            harness = _resolve_harness(conv) if conv else None
-            # Resolve the actual named provider so non-default sessions are
-            # priced at their configured rate, not the harness default's rate.
-            provider_entry = _resolve_session_provider_entry(conv)
+            harness, provider_entry = _resolve_session_pricing_context(conv)
+            provider_config = load_config() if provider_entry is None else None
             pricing = fetch_model_pricing_with_provider(
                 model_name,
                 provider_config=provider_config,
@@ -3688,6 +3707,16 @@ async def _persist_external_conversation_item_unlocked(
                 and match_method != "fifo_fallback"
             ):
                 item = item.model_copy(update={"created_by": drained.created_by})
+            # A text match also keeps what sent the message, e.g. a /loop run's origin.
+            if (
+                drained.origin is not None
+                and isinstance(item.data, MessageData)
+                and item.data.origin is None
+                and match_method != "fifo_fallback"
+            ):
+                item = item.model_copy(
+                    update={"data": item.data.model_copy(update={"origin": drained.origin})}
+                )
             # A web client that sends stable_id gets store-level idempotency:
             # use it directly as the item id so the append is a no-op on retry.
             # source_id from the forwarder takes precedence when both are set.
@@ -3720,6 +3749,19 @@ async def _persist_external_conversation_item_unlocked(
         drained = pending_inputs.resolve_shell_command(session_id, shell_command, hold=True)
         if drained is not None:
             cleared_pending_id = drained.pending_id
+    if isinstance(item.data, TerminalCommandData) and item.data.kind == "input":
+        item = item.model_copy(
+            update={
+                "data": item.data.model_copy(
+                    update={
+                        "submission": TerminalCommandSubmission(
+                            pending_id=drained.pending_id if drained else None,
+                            stable_id=drained.stable_id if drained else None,
+                        )
+                    }
+                )
+            }
+        )
     if drained is not None:
         item = item.model_copy(update={"replaces_pending_id": drained.stable_id})
     # Build the batch: skipped entries first (their positions must precede
@@ -4241,7 +4283,9 @@ async def _settle_undelivered_native_input(
     item = NewConversationItem(
         type="message",
         response_id=response_id or generate_task_id(),
-        data=MessageData(role="user", content=drained.content, user_authored=True),
+        data=MessageData(
+            role="user", content=drained.content, user_authored=True, origin=drained.origin
+        ),
         created_by=drained.created_by,
         stable_id=drained.stable_id
         or uuid.uuid5(
@@ -4435,7 +4479,9 @@ def _build_skipped_native_items(
             NewConversationItem(
                 type="message",
                 response_id=turn_id,
-                data=MessageData(role="user", content=skipped.content, user_authored=True),
+                data=MessageData(
+                    role="user", content=skipped.content, user_authored=True, origin=skipped.origin
+                ),
                 created_by=skipped.created_by,
                 stable_id=uuid.uuid5(
                     uuid.NAMESPACE_URL,
@@ -7446,6 +7492,22 @@ async def _persist_native_terminal_failure(
     return consumed.id
 
 
+def _host_launch_failure_message(host_error: str | None, host_error_code: str) -> str:
+    """The reason shown when a host categorically refused to launch the session's runner.
+
+    :param host_error: The host's refusal text, when it is safe to show.
+    :param host_error_code: Allowlisted structured host failure category.
+    """
+    if host_error:
+        return host_error
+    if host_error_code == _HARNESS_NOT_CONFIGURED_ERROR_CODE:
+        return (
+            "the agent's harness is not configured on the selected host — "
+            f"run `{cli_invocation()} setup`"
+        )
+    return "The session workspace no longer exists on the selected host."
+
+
 async def _persist_host_launch_failure_turn(
     session_id: str,
     conv: Conversation,
@@ -7492,16 +7554,10 @@ async def _persist_host_launch_failure_turn(
         _WORKSPACE_MISSING_ERROR_CODE,
     }:
         raise ValueError(f"unsafe host launch error code: {host_error_code!r}")
-    fallback_message = (
-        "the agent's harness is not configured on the selected host — "
-        f"run `{cli_invocation()} setup`"
-        if host_error_code == _HARNESS_NOT_CONFIGURED_ERROR_CODE
-        else "The session workspace no longer exists on the selected host."
-    )
     error = ErrorData(
         source="execution",
         code=host_error_code,
-        message=host_error if host_error else fallback_message,
+        message=_host_launch_failure_message(host_error, host_error_code),
     )
     turn_id = generate_task_id()
     user_item = _build_new_item(body, turn_id, created_by=created_by)
@@ -9365,7 +9421,12 @@ async def _dispatch_session_event_to_runner_impl(
                 created_by=created_by,
                 failure_context=ensure_outcome.failure_context,
             )
-            return _SessionEventDispatchResult(item_id=item_id, pending_id=None, accepted=False)
+            return _SessionEventDispatchResult(
+                item_id=item_id,
+                pending_id=None,
+                accepted=False,
+                rejected=ensure_outcome.error.message,
+            )
         if ensure_outcome.policy_notice is not None:
             # Terminal is up but policy enforcement is off (fail-open). Post
             # a durable, non-fatal banner; the user message still forwards.
@@ -9379,6 +9440,10 @@ async def _dispatch_session_event_to_runner_impl(
         # back on any failure/cancellation so a message the TUI never
         # received doesn't replay as a ghost.
         content = body.data.get("content")
+        # What sent the message when no human typed it (a /loop run), restored onto
+        # the mirror the transcript sends back, as created_by is.
+        raw_origin = body.data.get("origin")
+        message_origin = raw_origin if isinstance(raw_origin, str) else None
         raw_stable_id = body.data.get("stable_id")
         web_stable_id = (
             raw_stable_id
@@ -9451,6 +9516,7 @@ async def _dispatch_session_event_to_runner_impl(
                 created_by=created_by,
                 stable_id=web_stable_id,
                 background_titles_enabled=background_titles_enabled,
+                origin=message_origin,
             )
             if queues_message
             else None
@@ -15700,6 +15766,7 @@ __all__ = [
     "_handle_mcp_tools_call",
     "_heal_subagent_runner_binding_via_parent",
     "_hold_native_ask_gate",
+    "_host_launch_failure_message",
     "_is_native_terminal_session",
     "_kick_managed_relaunch",
     "_kick_managed_wake",
